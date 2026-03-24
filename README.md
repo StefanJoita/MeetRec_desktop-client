@@ -1,95 +1,107 @@
 # MeetRec Desktop Client
 
-Client desktop pentru calculatorul din sala de sedinte. Aplicatia capteaza audio de la microfonul local, segmenteaza inregistrarea in bucati fixe si trimite fiecare segment catre serverul MeetRec prin API-ul existent.
+Client desktop pentru calculatorul din sala de ședințe. Aplicația captează audio de la microfonul local, segmentează înregistrarea în bucăți fixe și trimite fiecare segment către serverul MeetRec prin API-ul existent.
 
-## Ce face MVP-ul
+## Ce face aplicația
 
-- login cu user si parola prin `/api/v1/auth/login`
-- verificare sesiune prin `/api/v1/auth/me`
-- inregistrare continua pe segmente prin `MediaRecorder`
-- coada locala persistenta pe disc pentru segmentele netrimise
-- retry automat la upload catre `/api/v1/inbox/upload`
-- configurare pentru URL server, nume sala, locatie si durata segmentului
-- selectie de microfon din dispozitivele disponibile pe calculator
+- setup wizard la prima pornire: configurare server, sală și permisiune microfon
+- login cu user și parolă prin `/api/v1/auth/login`, restore automată a sesiunii
+- înregistrare continuă pe segmente (WAV PCM 16-bit, mono)
+- fiecare sesiune de înregistrare primește un `session_id` unic — toate segmentele aceleiași ședințe sunt grupate pe server ca o singură înregistrare
+- coadă locală persistentă pe disc pentru segmentele netrimise
+- retry automat la upload la fiecare 5 secunde
+- interfață separată pentru rolul operator (simplu: start/stop) și admin (configurare completă)
+- test conexiune server și test microfon din setări
 
-## Structura
+## Structură
 
 ```text
-desktop-client/
-├── electron/
-│   ├── main.ts
-│   └── preload.ts
-├── src/
-│   ├── App.tsx
-│   ├── index.css
-│   ├── main.tsx
-│   ├── lib/api.ts
-│   └── types/electron.d.ts
-├── index.html
-├── package.json
-├── tsconfig.json
-├── tsconfig.node.json
-└── vite.config.ts
+electron/
+  main.ts          — process principal: filesystem, IPC, upload HTTP
+  preload.ts       — bridge IPC tipat
+
+src/
+  app/
+    AppShell.tsx   — routing bazat pe stare (setup / login / rol)
+  features/
+    auth/          — login, restore sesiune, logout
+    recorder/      — Web Audio API, encoding WAV, segmentare
+    queue/         — polling coadă, retry upload
+    settings/      — load/save setări
+    setup/         — wizard prima pornire
+  screens/
+    OperatorScreen.tsx
+    AdminScreen.tsx
+    ParticipantBlockedScreen.tsx
+  shared/
+    hooks/useDevices.ts   — permisiune microfon + enumerare dispozitive
+  infrastructure/
+    api/           — auth-api, http-client
+    desktop-bridge.ts
+    session-storage.ts
 ```
 
-## Cerinte locale
+## Cerințe locale
 
 - Node.js 20+
 - npm 10+
-- Windows 10/11 pentru rularea initiala in sala
+- Windows 10/11
 
 ## Comenzi
 
 ```powershell
-Set-Location .\desktop-client
+# Prima rulare
 npm install
+
+# Development
+$env:Path = "C:\Program Files\nodejs;" + $env:Path
 npm run dev
 ```
 
-Pentru build portabil Windows:
+Build distribuție Windows:
 
 ```powershell
-Set-Location .\desktop-client
-npm run dist:portable
+npm run dist:portable   # executabil portabil
+npm run dist:setup      # installer NSIS
+npm run dist:all        # ambele variante
 ```
 
-Pentru setup cu interfata grafica (wizard Next/Install/Finish):
+Artefactele se generează în `release/`.
 
-```powershell
-Set-Location .\desktop-client
-npm run dist:setup
-```
+## Flux operațional
 
-Pentru ambele variante (portable + setup):
+1. La prima pornire, wizard-ul ghidează configurarea: URL server → nume sală → permisiune microfon.
+2. Aplicația restaurează automat sesiunea anterioară la repornire.
+3. Operatorul pornește înregistrarea, introduce titlul ședinței și participanții.
+4. Aplicația înregistrează continuu și taie segmente la intervalul configurat (implicit 5 minute).
+5. Fiecare segment e salvat local cu `session_id` și `segment_index`, apoi trimis automat la server.
+6. Dacă serverul nu răspunde, segmentele rămân pe disc și se retrimite automat.
 
-```powershell
-Set-Location .\desktop-client
-npm run dist:all
-```
+## API server — câmpuri trimise la upload
 
-Artefactele se genereaza in `desktop-client/release/`.
+`POST /api/v1/inbox/upload` — `multipart/form-data`:
 
-- varianta portabila: executabil direct
-- varianta setup: `MeetRec-Room-Client-Setup-<versiune>.exe`
+| Câmp | Descriere |
+|------|-----------|
+| `file` | fișier WAV |
+| `title` | titlul ședinței |
+| `meeting_date` | data ședinței (YYYY-MM-DD) |
+| `location` | locația |
+| `participants` | participanți separați prin virgulă |
+| `description` | `Inregistrare automata — <nume sală>` |
+| `session_id` | UUID unic per sesiune de înregistrare |
+| `segment_index` | ordinea segmentului (0, 1, 2...) |
 
-## Flux operational
+`session_id` și `segment_index` permit serverului să grupeze toate segmentele aceleiași ședințe ca o singură înregistrare.
 
-1. Operatorul configureaza URL-ul serverului si datele salii.
-2. Clientul se autentifica cu un cont existent din MeetRec.
-3. La pornirea recorderului, aplicatia creeaza segmente audio locale la intervalul configurat.
-4. Fiecare segment este salvat in coada locala si apoi trimis automat la server.
-5. Daca serverul nu raspunde, segmentele raman pe disc si se reincarca la urmatorul ciclu de retry.
+## Limitări curente
 
-## Limitari curente
+- pornirea automată cu Windows nu este implementată încă
+- upload-ul continuă doar cât timp aplicația rămâne deschisă
+- fără autentificare dedicată de dispozitiv (folosește user/parolă)
 
-- pornirea automata cu Windows nu este implementata inca
-- sesiunea este pastrata local, dar credentialele nu sunt memorate
-- pentru MVP, upload-ul continua doar cat timp aplicatia ramane deschisa
-- titlurile segmentelor sunt generate automat din numele salii si timestamp
+## Pași următori recomandați
 
-## Urmatorii pasi recomandati
-
-- cheie dedicata de dispozitiv in loc de user/parola
-- auto-start la boot si minimizare in system tray
-- health checks pentru microfon si server
-- jurnal local de evenimente si ecran de diagnostics
+- cheie dedicată de dispozitiv în loc de user/parolă
+- auto-start la boot și minimizare în system tray
+- jurnal local de evenimente
