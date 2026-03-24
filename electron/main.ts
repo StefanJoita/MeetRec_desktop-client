@@ -224,6 +224,9 @@ async function sendSessionComplete(payload: { id: string; serverUrl: string; tok
     return { ok: true, status: 0, body: 'incomplete job deleted' }
   }
 
+  const requestBody = JSON.stringify({ recording_id: job.recordingId, total_segments: job.totalSegments })
+  console.log('[SessionComplete] trimit:', requestBody)
+
   const response = await fetch(
     `${normalizeServerUrl(payload.serverUrl)}/api/v1/inbox/session/${job.sessionId}/complete`,
     {
@@ -232,7 +235,7 @@ async function sendSessionComplete(payload: { id: string; serverUrl: string; tok
         Authorization: `Bearer ${payload.token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ recording_id: job.recordingId, total_segments: job.totalSegments }),
+      body: requestBody,
     },
   )
 
