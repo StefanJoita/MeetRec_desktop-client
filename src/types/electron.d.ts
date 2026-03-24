@@ -19,6 +19,7 @@ export type QueueItem = {
   meetingDate: string
   sessionId: string
   segmentIndex: number
+  existingRecordingId?: string
 }
 
 export type QueueUploadResult = {

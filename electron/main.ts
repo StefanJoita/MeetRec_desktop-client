@@ -23,6 +23,7 @@ type StoredSegmentMeta = {
   participants: string
   sessionId: string
   segmentIndex: number
+  existingRecordingId?: string
 }
 
 type QueueItem = {
@@ -38,6 +39,7 @@ type QueueItem = {
   meetingDate: string
   sessionId: string
   segmentIndex: number
+  existingRecordingId?: string
 }
 
 const defaultSettings: ClientSettings = {
@@ -156,6 +158,18 @@ async function enqueueSegment(payload: {
   return { id }
 }
 
+async function patchSiblingSegments(sessionId: string, uploadedId: string, recordingId: string) {
+  const files = await readdir(getQueueDir())
+  for (const file of files.filter(f => f.endsWith('.json'))) {
+    const metaPath = path.join(getQueueDir(), file)
+    const m = JSON.parse(await readFile(metaPath, 'utf-8')) as StoredSegmentMeta
+    if (m.sessionId === sessionId && m.id !== uploadedId && !m.existingRecordingId) {
+      m.existingRecordingId = recordingId
+      await writeFile(metaPath, JSON.stringify(m, null, 2), 'utf-8')
+    }
+  }
+}
+
 async function deleteQueueItem(id: string) {
   await rm(path.join(getQueueDir(), `${id}.audio`), { force: true })
   await rm(path.join(getQueueDir(), `${id}.json`), { force: true })
@@ -176,8 +190,13 @@ async function uploadQueueItem(payload: { id: string; serverUrl: string; token: 
     form.append('participants', meta.participants)
   }
   form.append('description', `Inregistrare automata — ${meta.roomName}`)
-  form.append('session_id', meta.sessionId)
-  form.append('segment_index', String(meta.segmentIndex))
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  const sessionId = UUID_RE.test(meta.sessionId ?? '') ? meta.sessionId : randomUUID()
+  form.append('session_id', sessionId)
+  form.append('segment_index', String(Number.isInteger(meta.segmentIndex) ? meta.segmentIndex : 0))
+  if (meta.existingRecordingId) {
+    form.append('existing_recording_id', meta.existingRecordingId)
+  }
 
   const response = await fetch(`${normalizeServerUrl(payload.serverUrl)}/api/v1/inbox/upload`, {
     method: 'POST',
@@ -193,6 +212,13 @@ async function uploadQueueItem(payload: { id: string; serverUrl: string; token: 
     body = bodyText ? JSON.parse(bodyText) : null
   } catch {
     body = bodyText
+  }
+
+  if (response.ok && body !== null && typeof body === 'object' && 'recording_id' in body) {
+    const recordingId = (body as { recording_id: string }).recording_id
+    if (recordingId && meta.sessionId) {
+      await patchSiblingSegments(meta.sessionId, payload.id, recordingId)
+    }
   }
 
   return {
