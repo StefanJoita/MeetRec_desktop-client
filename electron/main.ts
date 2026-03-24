@@ -218,6 +218,11 @@ async function sendSessionComplete(payload: { id: string; serverUrl: string; tok
   const jobPath = path.join(getQueueDir(), `${payload.id}.json`)
   const job = JSON.parse(await readFile(jobPath, 'utf-8')) as SessionCompleteJob
 
+  if (!job.recordingId || !job.totalSegments) {
+    console.error('[SessionComplete] fișier incomplete — lipsesc recordingId sau totalSegments:', job)
+    return { ok: false, status: 0, body: 'incomplete job file' }
+  }
+
   const response = await fetch(
     `${normalizeServerUrl(payload.serverUrl)}/api/v1/inbox/session/${job.sessionId}/complete`,
     {
