@@ -33,27 +33,27 @@ export function useQueueSync(token: string | null, serverUrl: string, onUnauthor
           setItems(list)
           if (!list.length) break
 
-          const result = await desktopBridge.queue.upload({
-            id: list[0].id,
-            serverUrl,
-            token,
-          })
+          const item = list[0]
+          const result = item.type === 'session_complete'
+            ? await desktopBridge.queue.complete({ id: item.id, serverUrl, token })
+            : await desktopBridge.queue.upload({ id: item.id, serverUrl, token })
 
           if (!result.ok) {
             const detail = result.body && typeof result.body === 'object'
               ? JSON.stringify(result.body)
               : result.body ? String(result.body) : ''
-            console.error(`[QueueSync] upload failed HTTP ${result.status}:`, detail)
+            const action = item.type === 'session_complete' ? 'Complete sesiune eșuat' : 'Upload eșuat'
+            console.error(`[QueueSync] ${action} HTTP ${result.status}:`, detail)
             if (result.status === 401) {
               setError(`401 Unauthorized${detail ? ` — ${detail}` : ''}. Verifică că serverul rulează.`)
               onUnauthorized?.()
             } else {
-              setError(`Upload eșuat (HTTP ${result.status}${detail ? `: ${detail}` : ''}). Se retrimite automat.`)
+              setError(`${action} (HTTP ${result.status}${detail ? `: ${detail}` : ''}). Se retrimite automat.`)
             }
             break
           }
 
-          await desktopBridge.queue.delete(list[0].id)
+          await desktopBridge.queue.delete(item.id)
           setError('')
         }
       } finally {

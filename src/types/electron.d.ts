@@ -8,6 +8,7 @@ export type ClientSettings = {
 
 export type QueueItem = {
   id: string
+  type?: 'upload' | 'session_complete'
   fileName: string
   mimeType: string
   createdAt: string
@@ -19,6 +20,7 @@ export type QueueItem = {
   meetingDate: string
   sessionId: string
   segmentIndex: number
+  totalSegments?: number
   existingRecordingId?: string
 }
 
@@ -39,6 +41,7 @@ export type QueueEnqueuePayload = {
   participants: string
   sessionId: string
   segmentIndex: number
+  isFinalSegment?: boolean
 }
 
 declare global {
@@ -53,6 +56,7 @@ declare global {
         enqueue: (payload: QueueEnqueuePayload) => Promise<{ id: string }>
         delete: (id: string) => Promise<void>
         upload: (payload: { id: string; serverUrl: string; token: string }) => Promise<QueueUploadResult>
+        complete: (payload: { id: string; serverUrl: string; token: string }) => Promise<QueueUploadResult>
       }
     }
   }

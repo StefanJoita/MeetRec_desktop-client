@@ -23,5 +23,8 @@ export const desktopBridge = {
     upload(payload: { id: string; serverUrl: string; token: string }): Promise<QueueUploadResult> {
       return window.meetrecDesktop.queue.upload(payload)
     },
+    complete(payload: { id: string; serverUrl: string; token: string }): Promise<QueueUploadResult> {
+      return window.meetrecDesktop.queue.complete(payload)
+    },
   },
 }

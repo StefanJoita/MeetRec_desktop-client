@@ -23,7 +23,16 @@ type StoredSegmentMeta = {
   participants: string
   sessionId: string
   segmentIndex: number
+  totalSegments?: number
   existingRecordingId?: string
+}
+
+type SessionCompleteJob = {
+  id: string
+  type: 'session_complete'
+  sessionId: string
+  recordingId: string
+  createdAt: string
 }
 
 type QueueItem = {
@@ -39,7 +48,9 @@ type QueueItem = {
   meetingDate: string
   sessionId: string
   segmentIndex: number
+  totalSegments?: number
   existingRecordingId?: string
+  type?: 'upload' | 'session_complete'
 }
 
 const defaultSettings: ClientSettings = {
@@ -89,10 +100,12 @@ async function saveSettings(settings: ClientSettings) {
 async function listQueueItems(): Promise<QueueItem[]> {
   await ensureAppStorage()
   const files = await readdir(getQueueDir())
-  const metaFiles = files.filter(file => file.endsWith('.json'))
 
-  const items = await Promise.all(
-    metaFiles.map(async file => {
+  const uploadFiles = files.filter(f => f.endsWith('.json') && !f.startsWith('scomplete-'))
+  const completeFiles = files.filter(f => f.startsWith('scomplete-') && f.endsWith('.json'))
+
+  const uploadItems = await Promise.all(
+    uploadFiles.map(async file => {
       const metaPath = path.join(getQueueDir(), file)
       const meta = JSON.parse(await readFile(metaPath, 'utf-8')) as StoredSegmentMeta
       const audioPath = path.join(getQueueDir(), `${meta.id}.audio`)
@@ -111,16 +124,31 @@ async function listQueueItems(): Promise<QueueItem[]> {
           meetingDate: meta.meetingDate,
           sessionId: meta.sessionId,
           segmentIndex: meta.segmentIndex,
-        }
+          totalSegments: meta.totalSegments,
+          existingRecordingId: meta.existingRecordingId,
+        } as QueueItem
       } catch {
-        // Audio file missing (partial delete) — skip this item
         return null
       }
     }),
   )
 
-  return items
-    .filter((item): item is QueueItem => item !== null)
+  const completeItems = await Promise.all(
+    completeFiles.map(async file => {
+      const job = JSON.parse(await readFile(path.join(getQueueDir(), file), 'utf-8')) as SessionCompleteJob
+      return {
+        id: job.id,
+        type: 'session_complete' as const,
+        sessionId: job.sessionId,
+        createdAt: job.createdAt,
+        // câmpuri obligatorii în tip, neutilizate pentru complete jobs
+        fileName: '', mimeType: '', sizeBytes: 0, title: '', roomName: '',
+        location: '', participants: '', meetingDate: '', segmentIndex: 0,
+      } as QueueItem
+    }),
+  )
+
+  return [...uploadItems.filter((item): item is QueueItem => item !== null), ...completeItems]
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
 }
 
@@ -135,9 +163,11 @@ async function enqueueSegment(payload: {
   participants: string
   sessionId: string
   segmentIndex: number
+  isFinalSegment?: boolean
 }) {
   await ensureAppStorage()
   const id = `${Date.now()}-${randomUUID()}`
+  const totalSegments = payload.isFinalSegment ? payload.segmentIndex + 1 : undefined
   const meta: StoredSegmentMeta = {
     id,
     fileName: payload.fileName,
@@ -150,12 +180,59 @@ async function enqueueSegment(payload: {
     participants: payload.participants,
     sessionId: payload.sessionId,
     segmentIndex: payload.segmentIndex,
+    totalSegments,
   }
 
   await writeFile(path.join(getQueueDir(), `${id}.audio`), Buffer.from(payload.bytes))
   await writeFile(path.join(getQueueDir(), `${id}.json`), JSON.stringify(meta, null, 2), 'utf-8')
 
+  if (payload.isFinalSegment && totalSegments !== undefined) {
+    const files = await readdir(getQueueDir())
+    for (const file of files.filter(f => f.endsWith('.json') && !f.startsWith('scomplete-'))) {
+      const p = path.join(getQueueDir(), file)
+      const m = JSON.parse(await readFile(p, 'utf-8')) as StoredSegmentMeta
+      if (m.sessionId === payload.sessionId && m.id !== id && m.totalSegments === undefined) {
+        m.totalSegments = totalSegments
+        await writeFile(p, JSON.stringify(m, null, 2), 'utf-8')
+      }
+    }
+  }
+
   return { id }
+}
+
+async function writeSessionCompleteJob(sessionId: string, recordingId: string) {
+  const job: SessionCompleteJob = {
+    id: `scomplete-${sessionId}`,
+    type: 'session_complete',
+    sessionId,
+    recordingId,
+    createdAt: new Date().toISOString(),
+  }
+  await writeFile(path.join(getQueueDir(), `scomplete-${sessionId}.json`), JSON.stringify(job, null, 2), 'utf-8')
+}
+
+async function sendSessionComplete(payload: { id: string; serverUrl: string; token: string }) {
+  const jobPath = path.join(getQueueDir(), `${payload.id}.json`)
+  const job = JSON.parse(await readFile(jobPath, 'utf-8')) as SessionCompleteJob
+
+  const response = await fetch(
+    `${normalizeServerUrl(payload.serverUrl)}/api/v1/inbox/session/${job.sessionId}/complete`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${payload.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ recording_id: job.recordingId }),
+    },
+  )
+
+  const bodyText = await response.text()
+  let body: unknown = null
+  try { body = bodyText ? JSON.parse(bodyText) : null } catch { body = bodyText }
+
+  return { ok: response.ok, status: response.status, body }
 }
 
 async function patchSiblingSegments(sessionId: string, uploadedId: string, recordingId: string) {
@@ -218,6 +295,21 @@ async function uploadQueueItem(payload: { id: string; serverUrl: string; token: 
     const recordingId = (body as { recording_id: string }).recording_id
     if (recordingId && meta.sessionId) {
       await patchSiblingSegments(meta.sessionId, payload.id, recordingId)
+
+      const isLastSegment = Number.isInteger(meta.totalSegments) &&
+        meta.segmentIndex === (meta.totalSegments as number) - 1
+      if (isLastSegment) {
+        await writeSessionCompleteJob(meta.sessionId, recordingId)
+        const completeResult = await sendSessionComplete({
+          id: `scomplete-${meta.sessionId}`,
+          serverUrl: payload.serverUrl,
+          token: payload.token,
+        }).catch(() => ({ ok: false }))
+        if (completeResult.ok) {
+          await rm(path.join(getQueueDir(), `scomplete-${meta.sessionId}.json`), { force: true })
+        }
+        // dacă eșuează, fișierul rămâne pe disk și e reîncercat de queue poller
+      }
     }
   }
 
@@ -270,6 +362,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('queue:enqueue', (_event, payload) => enqueueSegment(payload))
   ipcMain.handle('queue:delete', (_event, id: string) => deleteQueueItem(id))
   ipcMain.handle('queue:upload', (_event, payload) => uploadQueueItem(payload))
+  ipcMain.handle('queue:complete', (_event, payload) => sendSessionComplete(payload))
 
   createWindow()
 

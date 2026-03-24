@@ -100,7 +100,7 @@ export function useRecorder(roomName: string, location: string, segmentDurationS
     return () => window.clearInterval(id)
   }, [state])
 
-  async function flush(meta: RecordingMeta) {
+  async function flush(meta: RecordingMeta, isFinal = false) {
     const chunks = pcmChunksRef.current
     if (!chunks.length) return
 
@@ -122,6 +122,7 @@ export function useRecorder(roomName: string, location: string, segmentDurationS
         participants: meta.participants,
         sessionId: sessionIdRef.current,
         segmentIndex,
+        isFinalSegment: isFinal,
       }) })
       .catch(err => {
         setError(err instanceof Error ? err.message : 'Nu am putut salva segmentul audio.')
@@ -237,7 +238,7 @@ export function useRecorder(roomName: string, location: string, segmentDurationS
     const currentMeta = sessionMetaRef.current
     await teardown()
     if (currentMeta) {
-      await flush(currentMeta)
+      await flush(currentMeta, true)
     }
     setSessionMeta(null)
     setState('idle')

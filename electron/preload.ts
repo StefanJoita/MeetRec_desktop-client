@@ -10,5 +10,6 @@ contextBridge.exposeInMainWorld('meetrecDesktop', {
     enqueue: (payload: unknown) => ipcRenderer.invoke('queue:enqueue', payload),
     delete: (id: string) => ipcRenderer.invoke('queue:delete', id),
     upload: (payload: unknown) => ipcRenderer.invoke('queue:upload', payload),
+    complete: (payload: unknown) => ipcRenderer.invoke('queue:complete', payload),
   },
 })
