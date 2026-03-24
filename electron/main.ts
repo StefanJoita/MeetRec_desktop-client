@@ -32,6 +32,7 @@ type SessionCompleteJob = {
   type: 'session_complete'
   sessionId: string
   recordingId: string
+  totalSegments: number
   createdAt: string
 }
 
@@ -201,12 +202,13 @@ async function enqueueSegment(payload: {
   return { id }
 }
 
-async function writeSessionCompleteJob(sessionId: string, recordingId: string) {
+async function writeSessionCompleteJob(sessionId: string, recordingId: string, totalSegments: number) {
   const job: SessionCompleteJob = {
     id: `scomplete-${sessionId}`,
     type: 'session_complete',
     sessionId,
     recordingId,
+    totalSegments,
     createdAt: new Date().toISOString(),
   }
   await writeFile(path.join(getQueueDir(), `scomplete-${sessionId}.json`), JSON.stringify(job, null, 2), 'utf-8')
@@ -224,7 +226,7 @@ async function sendSessionComplete(payload: { id: string; serverUrl: string; tok
         Authorization: `Bearer ${payload.token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ recording_id: job.recordingId }),
+      body: JSON.stringify({ recording_id: job.recordingId, total_segments: job.totalSegments }),
     },
   )
 
@@ -299,7 +301,7 @@ async function uploadQueueItem(payload: { id: string; serverUrl: string; token: 
       const isLastSegment = Number.isInteger(meta.totalSegments) &&
         meta.segmentIndex === (meta.totalSegments as number) - 1
       if (isLastSegment) {
-        await writeSessionCompleteJob(meta.sessionId, recordingId)
+        await writeSessionCompleteJob(meta.sessionId, recordingId, meta.totalSegments as number)
         const completeResult = await sendSessionComplete({
           id: `scomplete-${meta.sessionId}`,
           serverUrl: payload.serverUrl,
