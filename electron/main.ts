@@ -219,8 +219,9 @@ async function sendSessionComplete(payload: { id: string; serverUrl: string; tok
   const job = JSON.parse(await readFile(jobPath, 'utf-8')) as SessionCompleteJob
 
   if (!job.recordingId || !job.totalSegments) {
-    console.error('[SessionComplete] fișier incomplete — lipsesc recordingId sau totalSegments:', job)
-    return { ok: false, status: 0, body: 'incomplete job file' }
+    console.warn('[SessionComplete] fișier job fără totalSegments — șters, serverul va folosi timeout-ul de 120s:', job.id)
+    await rm(jobPath, { force: true })
+    return { ok: true, status: 0, body: 'incomplete job deleted' }
   }
 
   const response = await fetch(
