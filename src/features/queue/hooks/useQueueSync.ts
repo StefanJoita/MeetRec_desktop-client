@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { desktopBridge } from '@/infrastructure/desktop-bridge'
 import type { QueueItem } from '@/types/electron'
 
-export function useQueueSync(token: string | null, serverUrl: string) {
+export function useQueueSync(token: string | null, serverUrl: string, onUnauthorized?: () => void) {
   const [items, setItems] = useState<QueueItem[]>([])
   const [draining, setDraining] = useState(false)
   const [error, setError] = useState('')
@@ -42,6 +42,7 @@ export function useQueueSync(token: string | null, serverUrl: string) {
           if (!result.ok) {
             if (result.status === 401) {
               setError('Sesiunea a expirat. Autentifică-te din nou.')
+              onUnauthorized?.()
             } else {
               setError(`Upload eșuat (HTTP ${result.status}). Se retrimite automat.`)
             }

@@ -55,7 +55,12 @@ export function AppShell() {
     error: queueError,
     totalBytes: queueTotalBytes,
     deleteItem: deleteQueueItem,
-  } = useQueueSync(session?.token ?? null, settings.serverUrl)
+  } = useQueueSync(session?.token ?? null, settings.serverUrl, () => {
+    void (async () => {
+      if (recorderState === 'recording') await stopRecording()
+      logout()
+    })()
+  })
 
   // Init
   useEffect(() => {
