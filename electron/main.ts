@@ -8,6 +8,7 @@ type ClientSettings = {
   roomName: string
   location: string
   segmentDurationSeconds: number
+  setupComplete: boolean
 }
 
 type StoredSegmentMeta = {
@@ -20,6 +21,8 @@ type StoredSegmentMeta = {
   meetingDate: string
   title: string
   participants: string
+  sessionId: string
+  segmentIndex: number
 }
 
 type QueueItem = {
@@ -33,6 +36,8 @@ type QueueItem = {
   location: string
   participants: string
   meetingDate: string
+  sessionId: string
+  segmentIndex: number
 }
 
 const defaultSettings: ClientSettings = {
@@ -40,6 +45,7 @@ const defaultSettings: ClientSettings = {
   roomName: 'Sala de sedinte',
   location: 'Sediu principal',
   segmentDurationSeconds: 300,
+  setupComplete: false,
 }
 
 let mainWindow: BrowserWindow | null = null
@@ -101,6 +107,8 @@ async function listQueueItems(): Promise<QueueItem[]> {
           location: meta.location,
           participants: meta.participants ?? '',
           meetingDate: meta.meetingDate,
+          sessionId: meta.sessionId,
+          segmentIndex: meta.segmentIndex,
         }
       } catch {
         // Audio file missing (partial delete) — skip this item
@@ -123,6 +131,8 @@ async function enqueueSegment(payload: {
   meetingDate: string
   title: string
   participants: string
+  sessionId: string
+  segmentIndex: number
 }) {
   await ensureAppStorage()
   const id = `${Date.now()}-${randomUUID()}`
@@ -136,6 +146,8 @@ async function enqueueSegment(payload: {
     meetingDate: payload.meetingDate,
     title: payload.title,
     participants: payload.participants,
+    sessionId: payload.sessionId,
+    segmentIndex: payload.segmentIndex,
   }
 
   await writeFile(path.join(getQueueDir(), `${id}.audio`), Buffer.from(payload.bytes))
@@ -164,6 +176,8 @@ async function uploadQueueItem(payload: { id: string; serverUrl: string; token: 
     form.append('participants', meta.participants)
   }
   form.append('description', `Inregistrare automata — ${meta.roomName}`)
+  form.append('session_id', meta.sessionId)
+  form.append('segment_index', String(meta.segmentIndex))
 
   const response = await fetch(`${normalizeServerUrl(payload.serverUrl)}/api/v1/inbox/upload`, {
     method: 'POST',
@@ -200,6 +214,15 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
     },
+  })
+
+  // Permite accesul la microfon din renderer
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
+    if (permission === 'media') {
+      callback(true)
+    } else {
+      callback(false)
+    }
   })
 
   const devServerUrl = process.env.VITE_DEV_SERVER_URL

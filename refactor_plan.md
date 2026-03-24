@@ -1,320 +1,303 @@
-# Refactor Plan
+# Refactor Plan — MeetRec Desktop Client
 
-## Obiectiv
-Transformarea clientului desktop dintr-un renderer React monolitic intr-o aplicatie modulara, usor de extins si testat, pastrand arhitectura buna deja existenta: Electron main process + preload bridge + React renderer.
+## Probleme identificate în forma actuală
 
-## Directie recomandata
-- pastram Electron pentru infrastructura desktop
-- pastram React pentru UI
-- introducem un strat clar de application/services intre UI si infrastructura
-- reorganizam frontend-ul pe feature-uri, nu intr-un singur App.tsx mare
-- pastram IPC ca granita clara intre renderer si capabilitatile native
+### Funcționale
+1. **Permisiune microfon nu se cere explicit** — `refreshDevices()` la init nu face `getUserMedia`, deci device ID-urile sunt goale sau invalide; prima înregistrare eșuează cu "Requested device not found"
+2. **Device ID invalid la start** — auto-selecția primului device ID din listă se face fără permisiune; ID-ul poate fi fantomă (dispozitiv enumerat dar inaccesibil)
+3. **Nu există flux de setup la prima pornire** — dacă serverul e `localhost:8080` și sala nu e configurată, utilizatorul nu știe ce să facă
+4. **Operatorul nu vede statusul upload-ului** — view-ul de operator are upload status bar, dar nu are acces la coadă sau diagnostice
+5. **`segmentIndex` în `SessionMeetingMeta`** — câmpul e redundant (valoarea reală e în `segmentIndexRef`); tipul e înșelător
 
-## Arhitectura recomandata
+### Arhitecturale
+6. **App.tsx monolitic** — 1100+ linii, amestecă auth, recorder, queue, settings, UI, toate în același component
+7. **UI accesează direct `window.meetrecDesktop` și `localStorage`** — zero separare între prezentare și infrastructură
+8. **Logica de business e în handlers inline** — imposibil de testat sau reutilizat
 
-### 1. Electron shell
-Responsabilitati:
-- creare si configurare fereastra desktop
-- filesystem local
-- persistenta setari
-- persistenta coada upload
-- executie upload catre server
-- expunere IPC handlers
+---
 
-Fisiere relevante:
-- electron/main.ts
-- electron/preload.ts
+## Flux de utilizare optim (redesign UX)
 
-Regula:
-- Electron ramane strat de infrastructura, nu loc pentru logica de UI.
+### Stări globale ale aplicației (în ordine)
 
-### 2. Application layer in renderer
-Acesta este stratul care lipseste clar in forma actuala.
+```
+SETUP (prima pornire)
+  → server URL + test conexiune
+  → configurare sală + locație
+  → cerere permisiune microfon
+  → gata
 
-Responsabilitati:
-- orchestrarea sesiunii de autentificare
-- start/stop recording
-- validarea fluxurilor
-- polling si retry pentru coada de upload
-- reguli de rol
-- coordonarea intre UI, API HTTP si IPC bridge
+LOGIN
+  → username + parolă
+  → restore automată din sesiune salvată
 
-Scop:
-- componentele UI sa nu cheme direct peste tot window.meetrecDesktop sau API-uri HTTP.
+BLOCAT (rol participant)
 
-### 3. Presentation layer
-Componente React orientate strict pe UI.
+OPERATOR
+  → un singur ecran: start/stop + status
 
-Exemple:
-- LoginScreen
-- OperatorScreen
-- AdminScreen
-- ParticipantBlockedScreen
-- StartMeetingModal
-- StopRecordingModal
-- QueueList
-- DiagnosticsPanel
-- SettingsForm
-
-Regula:
-- componentele de prezentare primesc props si emit actiuni; nu contin logica de business complexa.
-
-### 4. Services
-Servicii pure, fara JSX.
-
-Exemple:
-- auth-service.ts
-- recorder-service.ts
-- queue-service.ts
-- settings-service.ts
-
-Responsabilitati:
-- reguli de business
-- coordonare cu infrastructura
-- validari si mapari de date
-
-### 5. Infrastructure adapters
-Adaptoare pentru dependinte externe.
-
-Exemple:
-- auth-api.ts
-- http-client.ts
-- desktop-bridge.ts
-- session-storage.ts
-
-Responsabilitati:
-- apeluri HTTP
-- acces la window.meetrecDesktop
-- persistere token in localStorage
-
-## Flux recomandat
-
-```text
-UI Component
--> Feature Controller / Hook
--> Service
--> Infrastructure Adapter
--> Electron IPC sau HTTP API
+ADMIN
+  → sidebar + panou principal + navigare
 ```
 
-Exemple:
+### Flux detaliat
 
-### Login
-```text
-LoginForm
--> useAuthController
--> authService.login()
--> authApi.login() + authApi.getMe()
--> auth state update
+#### Prima pornire (setup wizard)
+Detectat când: `settings.serverUrl === 'http://localhost:8080'` și nu există sesiune salvată.
+
+**Pasul 1 — Server**
+- Input URL server
+- Buton "Testează conexiunea" → GET /api/v1/health sau /api/v1/auth/me cu token fals (așteptat 401)
+- Feedback vizibil: conectat / eroare rețea
+- Buton "Continuă" activ doar după test reușit
+
+**Pasul 2 — Sală**
+- Input: Nume sală (obligatoriu)
+- Input: Locație (opțional)
+- Input: Durată segment (default 300s, slider sau input numeric)
+
+**Pasul 3 — Microfon**
+- Explicație clară: "Aplicația are nevoie de acces la microfon pentru a înregistra"
+- Buton mare: "Acordă acces la microfon"
+- După permisiune: listează dispozitivele disponibile și permite selecția
+- Dacă permisiunea e refuzată: instrucțiuni cum să o acorde din Windows
+
+#### Reporniri normale
+- Auto-restore sesiune din localStorage
+- Dacă sesiunea e validă → direct la ecranul de rol
+- Dacă sesiunea a expirat → ecran login cu mesaj "Sesiunea a expirat"
+- Cererea permisiunii de microfon se face silențios la pornire; dacă e refuzată, se arată banner de avertizare
+
+#### Ecranul operator (simplificat)
+```
+┌─────────────────────────────────────┐
+│  MeetRec · Sala de ședințe          │
+│  [operator.sala]          [Logout]  │
+├─────────────────────────────────────┤
+│                                     │
+│     [icon microfon / animație]      │
+│                                     │
+│     In asteptare / ÎNREGISTREAZĂ    │
+│          00:12:34                   │
+│     Titlu ședință                   │
+│     Participanți                    │
+│                                     │
+│     [  Începe ședința  ] sau        │
+│     [  Încheie ședința ]            │
+│                                     │
+│  [erori dacă există]                │
+├─────────────────────────────────────┤
+│  ● Toate segmentele trimise         │  ← status bar upload
+└─────────────────────────────────────┘
 ```
 
-### Recording
-```text
-StartMeetingModal
--> useRecorderController
--> recorderService.startSession()
--> MediaRecorder produce chunks
--> queueService.enqueueChunk()
--> desktopBridge.queue.enqueue()
+- **Nu există navigare** — operatorul nu are de-a face cu setări sau coadă
+- Eroarea de microfon apare cu buton "Reîncearcă" care re-solicită permisiunea
+- Status bar upload vizibil permanent
+
+#### Ecranul admin
+- Sidebar cu: Panou, Configurare, Cont, Coadă upload, Diagnostic
+- Panoul principal identic cu cel de operator (start/stop recording)
+- Configurare: server, sală, locație, durată segment, selecție microfon cu test live
+- Coadă: lista segmentelor cu posibilitate de ștergere manuală
+- Diagnostic: stare sistem, versiune, format audio, device activ
+
+#### Cerere permisiune microfon — reguli
+1. La init app: `navigator.permissions.query({ name: 'microphone' })` — verifică fără a cere
+2. Dacă `state === 'granted'` → `refreshDevices(true)` silențios
+3. Dacă `state === 'prompt'` → arată banner "Acordă acces la microfon" cu buton explicit
+4. Dacă `state === 'denied'` → arată mesaj de eroare permanent cu instrucțiuni Windows
+5. Înainte de `startRecording()` → verifică din nou; dacă nu e granted, oprește cu mesaj clar
+6. La selectarea unui device în Settings → testează imediat cu `getUserMedia({ deviceId: { exact } })` scurt
+
+---
+
+## Arhitectura țintă
+
+### Strat Electron (neschimbat ca responsabilități)
+```
+electron/main.ts     — filesystem, IPC handlers, upload HTTP
+electron/preload.ts  — bridge IPC tipat
 ```
 
-### Upload sync
-```text
-useQueueSync
--> queueService.drain()
--> desktopBridge.queue.list/upload/delete()
+### Strat renderer
+
 ```
-
-## Structura de foldere recomandata
-
-```text
 src/
-  app/
-    AppShell.tsx
-    providers.tsx
-    routes.tsx
-
-  features/
-    auth/
-      components/
-      hooks/
-      auth-service.ts
-      auth-store.ts
-      auth-types.ts
-
-    recorder/
-      components/
-      hooks/
-      recorder-service.ts
-      recorder-store.ts
-      recorder-types.ts
-
-    queue/
-      components/
-      hooks/
-      queue-service.ts
-      queue-store.ts
-      queue-types.ts
-
-    settings/
-      components/
-      hooks/
-      settings-service.ts
-      settings-store.ts
-
-    diagnostics/
-      components/
-      diagnostics-service.ts
-
-  shared/
-    components/
-    hooks/
-    lib/
-    utils/
-
   infrastructure/
+    desktop-bridge.ts      — wrapper tipat peste window.meetrecDesktop
+    session-storage.ts     — localStorage abstraction
     api/
       http-client.ts
       auth-api.ts
-    electron/
-      desktop-bridge.ts
-    storage/
-      session-storage.ts
+
+  features/
+    setup/
+      SetupWizard.tsx
+      hooks/useSetupFlow.ts
+
+    auth/
+      LoginScreen.tsx
+      hooks/useAuth.ts
+      auth-service.ts
+
+    recorder/
+      hooks/useRecorder.ts
+      recorder-service.ts   — Web Audio API, WAV encoding, segmentare
+
+    queue/
+      hooks/useQueueSync.ts
+      QueuePanel.tsx
+
+    settings/
+      SettingsForm.tsx
+      hooks/useSettings.ts
+      mic-permission.ts     — logica permisiune microfon
+
+    diagnostics/
+      DiagnosticsPanel.tsx
+
+  screens/
+    OperatorScreen.tsx
+    AdminScreen.tsx
+    ParticipantBlockedScreen.tsx
+
+  shared/
+    components/
+      StatusBar.tsx
+      ErrorBanner.tsx
+      MicPermissionBanner.tsx
+    hooks/
+      useDevices.ts         — enumerare device-uri + listener devicechange
+
+  app/
+    AppShell.tsx            — routing bazat pe stare: setup / login / rol
+    AppProviders.tsx
 ```
 
-## Ce trebuie extras din App.tsx
+### Flux de date
 
-### 1. Auth
-Mutat intr-un modul separat:
-- login
-- restore session
-- logout
-- must_change_password
-- derivarea rolului
+```
+UI Component
+  → custom hook (useRecorder, useAuth, useSettings)
+    → service (recorder-service, auth-service)
+      → infrastructure adapter (desktop-bridge, auth-api, session-storage)
+        → Electron IPC sau HTTP
+```
 
-### 2. Recorder
-Mutat intr-un modul separat:
-- acces microfon
-- MediaRecorder
-- segmentare
-- start/stop
-- timer
-- metadata pentru sesiune
+**Regulă strictă**: niciun component UI nu importă direct `window.meetrecDesktop`, `axios`, sau `localStorage`.
 
-### 3. Queue sync
-Mutat intr-un modul separat:
-- listare coada
-- polling
-- retry upload
-- tratare 401
-- refresh queue
+---
 
-### 4. Settings
-Mutat intr-un modul separat:
-- load/save settings
-- selectie device
-- validari configurare
+## Modificări necesare față de planul inițial
 
-### 5. Layout si navigatie
-Mutat in componente dedicate:
-- admin shell
-- operator shell
-- participant blocked shell
-- sidebar
-- view switcher
+### Adăugat față de v1
 
-## State management recomandat
-Pentru dimensiunea actuala a aplicatiei, recomandare pragmatica:
-- useState si useReducer local pe feature
-- Context doar pentru stari globale mici
-- fara Redux in aceasta etapa
+**A. Permisiune microfon ca feature de sine stătător**
+- `src/features/settings/mic-permission.ts` — state machine: `unknown → checking → granted / prompt / denied`
+- `MicPermissionBanner` — component persistent când permisiunea nu e granted
+- Verificare permisiune înainte de `startRecording()`, nu doar la init
 
-Candidati buni pentru context sau compunere centrala:
-- sesiune autentificare
-- setari curente
-- stare recorder
+**B. Setup wizard**
+- `src/features/setup/SetupWizard.tsx` — 3 pași: server, sală, microfon
+- Detectat automat la prima pornire
+- Salvează setările și marchează setup ca finalizat (`settings.setupComplete: boolean`)
 
-## Reguli de proiectare
-- UI nu interactioneaza direct cu IPC peste tot
-- serviciile nu contin JSX
-- componentele de prezentare nu contin logica de business complexa
-- Electron main ramane infrastructura
-- preload expune contracte IPC clare si tipate
-- modulele sunt organizate pe domeniu functional, nu pe tip de fisier global
+**C. Modificare `ClientSettings`**
+```typescript
+type ClientSettings = {
+  serverUrl: string
+  roomName: string
+  location: string
+  segmentDurationSeconds: number
+  setupComplete: boolean   // ← nou
+}
+```
 
-## Ce trebuie evitat
-- un nou fisier gigant in locul lui App.tsx
-- apeluri window.meetrecDesktop raspandite in toate componentele
-- logica de auth amestecata cu logica de recording
-- state global excesiv
-- routing mai complex decat e nevoie pentru un client desktop mic
+**D. Curățare `SessionMeetingMeta`**
+- Eliminat `segmentIndex` din tip (rămâne doar în `segmentIndexRef` din recorder)
+- `sessionId` rămâne — generat la `startRecording()`, nu la construirea obiectului form
 
-## Plan de refactor in etape
+**E. Test conexiune server**
+- `auth-api.ts` — funcție `testConnection(serverUrl)` → boolean
+- Folosită în Setup wizard și în Settings form
 
-### Etapa 1. Extrage infrastructura renderer
-Creeaza:
-- src/infrastructure/api/http-client.ts
-- src/infrastructure/api/auth-api.ts
-- src/infrastructure/electron/desktop-bridge.ts
-- src/infrastructure/storage/session-storage.ts
+**F. Test microfon în Settings**
+- La selectarea unui device nou → `getUserMedia` scurt → feedback imediat "Funcționează" / eroare
 
-Rezultat:
-- App.tsx nu mai depinde direct de axios, localStorage si window.meetrecDesktop.
+**G. Error recovery în recorder**
+- La eroare "NotFoundError" (device lipsă) → buton "Schimbă microfonul" direct din ecranul operator
+- La eroare "NotAllowedError" (permisiune refuzată) → buton "Acordă permisiunea"
 
-### Etapa 2. Extrage serviciile
-Creeaza:
-- src/features/auth/auth-service.ts
-- src/features/recorder/recorder-service.ts
-- src/features/queue/queue-service.ts
-- src/features/settings/settings-service.ts
+### Modificat față de v1
 
-Rezultat:
-- logica de business devine reutilizabila si testabila.
+- `useRecorderController` → `useRecorder` — elimină `segmentIndex` din meta, îl gestionează intern
+- `useSettingsController` → `useSettings` — include logica de permisiune microfon
+- `AdminScreen` preia controlul recording din sidebar (ca acum), nu dintr-un panou separat
 
-### Etapa 3. Extrage hook-urile orchestratoare
-Creeaza:
-- src/features/auth/hooks/useAuthController.ts
-- src/features/recorder/hooks/useRecorderController.ts
-- src/features/queue/hooks/useQueueSync.ts
-- src/features/settings/hooks/useSettingsController.ts
+---
 
-Rezultat:
-- App.tsx pierde logica de orchestrare si ramane shell de compunere.
+## Plan de implementare în etape
 
-### Etapa 4. Extrage ecranele si componentele majore
-Creeaza:
-- LoginScreen
-- OperatorScreen
-- AdminScreen
-- ParticipantBlockedScreen
-- modalurile
-- panourile de settings, queue si diagnostics
+### Etapa 1 — Infrastructură renderer
+Fișiere noi:
+- `src/infrastructure/desktop-bridge.ts`
+- `src/infrastructure/session-storage.ts`
+- `src/infrastructure/api/http-client.ts`
+- `src/infrastructure/api/auth-api.ts` (+ `testConnection`)
 
-Rezultat:
-- UI devine mai usor de inteles si modificat.
+Rezultat: App.tsx nu mai accesează direct `window.meetrecDesktop`, `axios`, `localStorage`.
 
-### Etapa 5. Reduce App.tsx la AppShell
-App.tsx sau AppShell.tsx ar trebui sa faca doar:
-- bootstrapping aplicatie
-- alegerea ecranului in functie de sesiune si rol
-- compunerea providerelor si layout-ului principal
+### Etapa 2 — Feature hooks
+Fișiere noi:
+- `src/shared/hooks/useDevices.ts`
+- `src/features/settings/mic-permission.ts`
+- `src/features/auth/hooks/useAuth.ts`
+- `src/features/recorder/hooks/useRecorder.ts`
+- `src/features/queue/hooks/useQueueSync.ts`
+- `src/features/settings/hooks/useSettings.ts`
 
-Rezultat:
-- renderer curat, modular, predictibil.
+Rezultat: toată logica din App.tsx extrasă în hooks; App.tsx devine orchestrator pur.
 
-## Rezultatul final dorit
-Arhitectura finala recomandata este:
-- Electron main = infrastructura desktop
-- Preload = bridge IPC sigur si tipat
-- React renderer = UI modular pe feature-uri
-- Services = logica de business
-- Infrastructure adapters = HTTP, IPC, storage
-- App shell = compunere, nu logica grea
+### Etapa 3 — Setup wizard
+Fișiere noi:
+- `src/features/setup/SetupWizard.tsx`
+- `src/features/setup/hooks/useSetupFlow.ts`
 
-## Beneficii asteptate
-- cod mai usor de mentinut
-- separare clara a responsabilitatilor
-- refactoruri mai sigure
-- testare mai usoara
-- scalare mai buna a functionalitatilor viitoare
-- reducerea riscului de regresii in App.tsx
+Modificări:
+- `ClientSettings` primește `setupComplete`
+- `electron/main.ts` actualizat cu noul câmp
+- `AppShell` rutează la SetupWizard dacă `!settings.setupComplete`
+
+### Etapa 4 — Ecrane și componente
+Fișiere noi:
+- `src/screens/OperatorScreen.tsx`
+- `src/screens/AdminScreen.tsx`
+- `src/screens/ParticipantBlockedScreen.tsx`
+- `src/shared/components/MicPermissionBanner.tsx`
+- `src/shared/components/StatusBar.tsx`
+- `src/features/auth/LoginScreen.tsx`
+- `src/features/queue/QueuePanel.tsx`
+- `src/features/diagnostics/DiagnosticsPanel.tsx`
+- `src/features/settings/SettingsForm.tsx`
+
+### Etapa 5 — AppShell curat
+`src/app/AppShell.tsx`:
+```
+setup incomplete → SetupWizard
+no session       → LoginScreen
+participant      → ParticipantBlockedScreen
+operator         → OperatorScreen
+admin            → AdminScreen
+```
+
+App.tsx devine wrapper minim sau dispare complet.
+
+---
+
+## Ce NU se schimbă
+- Electron main process (logica de queue, upload, settings persistence)
+- IPC bridge (preload.ts)
+- WAV encoding (mutat în `recorder-service.ts`, logic identic)
+- Segmentarea audio (mutat în `useRecorder`, comportament identic)
+- Câmpurile trimise la server (`session_id`, `segment_index` rămân)

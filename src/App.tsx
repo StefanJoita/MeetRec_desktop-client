@@ -18,7 +18,8 @@ import {
   Users,
   X,
 } from 'lucide-react'
-import type { ClientSettings, QueueItem, SessionMeetingMeta } from '@/types/electron'
+import type { ClientSettings, QueueItem } from '@/types/electron'
+import type { RecordingMeta as SessionMeetingMeta } from '@/features/recorder/hooks/useRecorder'
 import { getMe, login, normalizeServerUrl, type AuthUser } from '@/lib/api'
 
 type RecorderState = 'idle' | 'recording' | 'stopping'
@@ -36,6 +37,7 @@ const defaultSettings: ClientSettings = {
   roomName: 'Sala de sedinte',
   location: 'Sediu principal',
   segmentDurationSeconds: 300,
+  setupComplete: false,
 }
 
 const sessionStorageKey = 'meetrec-desktop-session'
@@ -185,6 +187,8 @@ export default function App() {
   const flushPromiseRef = useRef<Promise<void>>(Promise.resolve())
   const drainingRef = useRef(false)
   const sessionMetaRef = useRef<SessionMeetingMeta | null>(null)
+  const segmentIndexRef = useRef(0)
+  const sessionIdRef = useRef('')
 
   // Keep sessionMetaRef in sync so the dataavailable closure reads fresh values
   useEffect(() => {
@@ -342,6 +346,8 @@ export default function App() {
           meetingDate: meta.meetingDate,
           title: meta.title,
           participants: meta.participants,
+          sessionId: sessionIdRef.current,
+          segmentIndex: segmentIndexRef.current++,
         })
         const items = await window.meetrecDesktop.queue.list()
         setQueueItems(items)
@@ -449,6 +455,8 @@ export default function App() {
   async function handleConfirmStart() {
     if (!startForm.title.trim()) return
     setShowStartModal(false)
+    segmentIndexRef.current = 0
+    sessionIdRef.current = crypto.randomUUID()
     await startRecording({
       title: startForm.title.trim(),
       participants: startForm.participants.trim(),

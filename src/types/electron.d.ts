@@ -3,13 +3,7 @@ export type ClientSettings = {
   roomName: string
   location: string
   segmentDurationSeconds: number
-}
-
-export type SessionMeetingMeta = {
-  title: string
-  participants: string // comma-separated names
-  meetingDate: string  // YYYY-MM-DD
-  location: string
+  setupComplete: boolean
 }
 
 export type QueueItem = {
@@ -23,6 +17,8 @@ export type QueueItem = {
   location: string
   participants: string
   meetingDate: string
+  sessionId: string
+  segmentIndex: number
 }
 
 export type QueueUploadResult = {
@@ -40,6 +36,8 @@ export type QueueEnqueuePayload = {
   meetingDate: string
   title: string
   participants: string
+  sessionId: string
+  segmentIndex: number
 }
 
 declare global {
