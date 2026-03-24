@@ -31,7 +31,6 @@ type SessionCompleteJob = {
   id: string
   type: 'session_complete'
   sessionId: string
-  recordingId: string
   totalSegments: number
   createdAt: string
 }
@@ -202,12 +201,11 @@ async function enqueueSegment(payload: {
   return { id }
 }
 
-async function writeSessionCompleteJob(sessionId: string, recordingId: string, totalSegments: number) {
+async function writeSessionCompleteJob(sessionId: string, totalSegments: number) {
   const job: SessionCompleteJob = {
     id: `scomplete-${sessionId}`,
     type: 'session_complete',
     sessionId,
-    recordingId,
     totalSegments,
     createdAt: new Date().toISOString(),
   }
@@ -218,24 +216,22 @@ async function sendSessionComplete(payload: { id: string; serverUrl: string; tok
   const jobPath = path.join(getQueueDir(), `${payload.id}.json`)
   const job = JSON.parse(await readFile(jobPath, 'utf-8')) as SessionCompleteJob
 
-  if (!job.recordingId || !job.totalSegments) {
-    console.warn('[SessionComplete] fișier job fără totalSegments — șters, serverul va folosi timeout-ul de 120s:', job.id)
+  if (!job.totalSegments) {
+    console.warn('[SessionComplete] fișier job fără totalSegments — șters:', job.id)
     await rm(jobPath, { force: true })
     return { ok: true, status: 0, body: 'incomplete job deleted' }
   }
 
-  const requestBody = JSON.stringify({ recording_id: job.recordingId, total_segments: job.totalSegments })
-  console.log('[SessionComplete] trimit:', requestBody)
+  const form = new FormData()
+  form.append('total_segments', String(job.totalSegments))
+  console.log('[SessionComplete] trimit session_id:', job.sessionId, 'total_segments:', job.totalSegments)
 
   const response = await fetch(
     `${normalizeServerUrl(payload.serverUrl)}/api/v1/inbox/session/${job.sessionId}/complete`,
     {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${payload.token}`,
-        'Content-Type': 'application/json',
-      },
-      body: requestBody,
+      headers: { Authorization: `Bearer ${payload.token}` },
+      body: form,
     },
   )
 
@@ -302,25 +298,33 @@ async function uploadQueueItem(payload: { id: string; serverUrl: string; token: 
     body = bodyText
   }
 
-  if (response.ok && body !== null && typeof body === 'object' && 'recording_id' in body) {
-    const recordingId = (body as { recording_id: string }).recording_id
-    if (recordingId && meta.sessionId) {
+  if (response.ok && meta.sessionId) {
+    // Patch recording_id pe celelalte segmente ale sesiunii (dacă e prezent în răspuns)
+    const recordingId = (
+      body !== null && typeof body === 'object' && 'recording_id' in body
+        ? (body as { recording_id: string | null }).recording_id
+        : null
+    )
+    if (recordingId) {
       await patchSiblingSegments(meta.sessionId, payload.id, recordingId)
+    }
 
-      const isLastSegment = Number.isInteger(meta.totalSegments) &&
-        meta.segmentIndex === (meta.totalSegments as number) - 1
-      if (isLastSegment) {
-        await writeSessionCompleteJob(meta.sessionId, recordingId, meta.totalSegments as number)
-        const completeResult = await sendSessionComplete({
-          id: `scomplete-${meta.sessionId}`,
-          serverUrl: payload.serverUrl,
-          token: payload.token,
-        }).catch(() => ({ ok: false }))
-        if (completeResult.ok) {
-          await rm(path.join(getQueueDir(), `scomplete-${meta.sessionId}.json`), { force: true })
-        }
-        // dacă eșuează, fișierul rămâne pe disk și e reîncercat de queue poller
+    // Trimite /complete după ultimul segment — fără să depindă de recording_id.
+    // Serverul face lookup după session_id singur.
+    const isLastSegment = Number.isInteger(meta.totalSegments) &&
+      meta.segmentIndex === (meta.totalSegments as number) - 1
+    if (isLastSegment) {
+      await writeSessionCompleteJob(meta.sessionId, meta.totalSegments as number)
+      const completeResult = await sendSessionComplete({
+        id: `scomplete-${meta.sessionId}`,
+        serverUrl: payload.serverUrl,
+        token: payload.token,
+      }).catch(() => ({ ok: false }))
+      if (completeResult.ok) {
+        await rm(path.join(getQueueDir(), `scomplete-${meta.sessionId}.json`), { force: true })
       }
+      // dacă eșuează (ex. ingest încă procesează seg 0 → 404), fișierul rămâne pe disk
+      // și queue poller îl reîncearcă la fiecare 5s
     }
   }
 
