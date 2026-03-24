@@ -40,11 +40,15 @@ export function useQueueSync(token: string | null, serverUrl: string, onUnauthor
           })
 
           if (!result.ok) {
+            const detail = result.body && typeof result.body === 'object'
+              ? JSON.stringify(result.body)
+              : result.body ? String(result.body) : ''
+            console.error(`[QueueSync] upload failed HTTP ${result.status}:`, detail)
             if (result.status === 401) {
-              setError('Sesiunea a expirat. Autentifică-te din nou.')
+              setError(`401 Unauthorized${detail ? ` — ${detail}` : ''}. Verifică că serverul rulează.`)
               onUnauthorized?.()
             } else {
-              setError(`Upload eșuat (HTTP ${result.status}). Se retrimite automat.`)
+              setError(`Upload eșuat (HTTP ${result.status}${detail ? `: ${detail}` : ''}). Se retrimite automat.`)
             }
             break
           }
