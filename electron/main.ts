@@ -239,12 +239,15 @@ async function sendSessionComplete(payload: { id: string; serverUrl: string; tok
   let body: unknown = null
   try { body = bodyText ? JSON.parse(bodyText) : null } catch { body = bodyText }
 
-  return { ok: response.ok, status: response.status, body }
+  // 409 = sesiunea a fost deja dispatchată (de ex. de Session Watcher) — tratăm ca succes
+  // pentru că scopul /complete a fost atins: sesiunea este în transcriere.
+  const ok = response.ok || response.status === 409
+  return { ok, status: response.status, body }
 }
 
 async function patchSiblingSegments(sessionId: string, uploadedId: string, recordingId: string) {
   const files = await readdir(getQueueDir())
-  for (const file of files.filter(f => f.endsWith('.json'))) {
+  for (const file of files.filter(f => f.endsWith('.json') && !f.startsWith('scomplete-'))) {
     const metaPath = path.join(getQueueDir(), file)
     const m = JSON.parse(await readFile(metaPath, 'utf-8')) as StoredSegmentMeta
     if (m.sessionId === sessionId && m.id !== uploadedId && !m.existingRecordingId) {

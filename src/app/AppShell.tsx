@@ -14,6 +14,7 @@ export function AppShell() {
   const {
     settings,
     setSettings,
+    initialized: settingsInitialized,
     saving: savingSettings,
     error: settingsError,
     saved: settingsSaved,
@@ -55,7 +56,7 @@ export function AppShell() {
     error: queueError,
     totalBytes: queueTotalBytes,
     deleteItem: deleteQueueItem,
-  } = useQueueSync(session?.token ?? null, settings.serverUrl)
+  } = useQueueSync(session?.token ?? null, settings.serverUrl, handleLogout)
 
   // Init
   useEffect(() => {
@@ -76,8 +77,8 @@ export function AppShell() {
     logout()
   }
 
-  // — Loading state (eerste init) —
-  if (!settings.setupComplete && authLoading) return null
+  // — Așteptăm încărcarea setărilor de pe disk înainte de orice randare —
+  if (!settingsInitialized) return null
 
   // — Setup wizard —
   if (!settings.setupComplete) {

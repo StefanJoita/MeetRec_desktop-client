@@ -13,6 +13,7 @@ export const defaultSettings: ClientSettings = {
 
 export function useSettings() {
   const [settings, setSettings] = useState<ClientSettings>(defaultSettings)
+  const [initialized, setInitialized] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [saved, setSaved] = useState(false)
@@ -20,6 +21,7 @@ export function useSettings() {
   async function loadSettings(): Promise<ClientSettings> {
     const loaded = await desktopBridge.settings.load()
     setSettings(loaded)
+    setInitialized(true)
     return loaded
   }
 
@@ -57,6 +59,7 @@ export function useSettings() {
   return {
     settings,
     setSettings,
+    initialized,
     saving,
     error,
     saved,

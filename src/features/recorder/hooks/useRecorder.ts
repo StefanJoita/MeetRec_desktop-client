@@ -10,20 +10,39 @@ export type RecordingMeta = {
   location: string
 }
 
-function mixToMono(inputBuffer: AudioBuffer): Float32Array {
-  const channelCount = inputBuffer.numberOfChannels
-  const frameCount = inputBuffer.length
-
-  if (channelCount === 1) {
-    return inputBuffer.getChannelData(0).slice()
-  }
-
-  const mono = new Float32Array(frameCount)
-  for (let ch = 0; ch < channelCount; ch++) {
-    const channelData = inputBuffer.getChannelData(ch)
-    for (let i = 0; i < frameCount; i++) {
-      mono[i] += channelData[i] / channelCount
+// ── AudioWorklet processor (inline, încărcat ca Blob URL) ─────────────────
+// Rulează pe Audio Worklet Thread — separat de main thread.
+// Primește blocuri de 128 sample-uri și le trimite pe main thread prin port.
+const WORKLET_CODE = `
+class PCMProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    const input = inputs[0]
+    if (input && input.length > 0) {
+      const channels = []
+      for (let ch = 0; ch < input.length; ch++) {
+        if (input[ch] && input[ch].length > 0) channels.push(input[ch].slice())
+      }
+      if (channels.length > 0) this.port.postMessage({ channels })
     }
+    return true
+  }
+}
+registerProcessor('pcm-processor', PCMProcessor)
+`
+
+function createWorkletUrl(): string {
+  const blob = new Blob([WORKLET_CODE], { type: 'application/javascript' })
+  return URL.createObjectURL(blob)
+}
+
+// ── Audio helpers ─────────────────────────────────────────────────────────
+
+function mixToMono(channels: Float32Array[]): Float32Array {
+  if (channels.length === 1) return channels[0].slice()
+  const frameCount = channels[0].length
+  const mono = new Float32Array(frameCount)
+  for (const ch of channels) {
+    for (let i = 0; i < frameCount; i++) mono[i] += ch[i] / channels.length
   }
   return mono
 }
@@ -65,6 +84,8 @@ function encodeWav(chunks: Float32Array[], sampleRate: number): ArrayBuffer {
   return buffer
 }
 
+// ── Hook ─────────────────────────────────────────────────────────────────
+
 export function useRecorder(roomName: string, location: string, segmentDurationSeconds: number) {
   const [state, setState] = useState<RecorderState>('idle')
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
@@ -73,8 +94,8 @@ export function useRecorder(roomName: string, location: string, segmentDurationS
 
   const mediaStreamRef = useRef<MediaStream | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
-  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null)
-  const processorNodeRef = useRef<ScriptProcessorNode | null>(null)
+  const workletNodeRef = useRef<AudioWorkletNode | null>(null)
+  const workletUrlRef = useRef<string | null>(null)
   const segmentTimerRef = useRef<number | null>(null)
   const pcmChunksRef = useRef<Float32Array[]>([])
   const sampleRateRef = useRef(48000)
@@ -136,19 +157,21 @@ export function useRecorder(roomName: string, location: string, segmentDurationS
       window.clearInterval(segmentTimerRef.current)
       segmentTimerRef.current = null
     }
-    if (processorNodeRef.current) {
-      processorNodeRef.current.onaudioprocess = null
-      processorNodeRef.current.disconnect()
-      processorNodeRef.current = null
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.onmessage = null
+      workletNodeRef.current.disconnect()
+      workletNodeRef.current = null
     }
-    sourceNodeRef.current?.disconnect()
-    sourceNodeRef.current = null
     mediaStreamRef.current?.getTracks().forEach(t => t.stop())
     mediaStreamRef.current = null
     if (audioContextRef.current) {
       const ctx = audioContextRef.current
       audioContextRef.current = null
       await ctx.close().catch(() => undefined)
+    }
+    if (workletUrlRef.current) {
+      URL.revokeObjectURL(workletUrlRef.current)
+      workletUrlRef.current = null
     }
   }
 
@@ -181,7 +204,6 @@ export function useRecorder(roomName: string, location: string, segmentDurationS
         console.log('[Recorder] stream OK:', stream.getAudioTracks().map(t => t.label))
       } catch (err) {
         console.warn('[Recorder] exact deviceId failed:', err instanceof DOMException ? `${err.name}: ${err.message}` : err)
-        // Device ID invalid sau inaccesibil — fallback la microfonul implicit
         if (err instanceof DOMException && (err.name === 'NotFoundError' || err.name === 'OverconstrainedError')) {
           console.log('[Recorder] fallback la microfon implicit fără constraints...')
           stream = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -195,24 +217,34 @@ export function useRecorder(roomName: string, location: string, segmentDurationS
       const audioContext = new AudioContext()
       await audioContext.resume()
 
+      // Înregistrăm worklet-ul ca Blob URL (fără fișier extern, fără plugin Vite)
+      const workletUrl = createWorkletUrl()
+      workletUrlRef.current = workletUrl
+      await audioContext.audioWorklet.addModule(workletUrl)
+
       const sourceNode = audioContext.createMediaStreamSource(stream)
-      const processorNode = audioContext.createScriptProcessor(4096, Math.max(1, sourceNode.channelCount || 1), 1)
+      const workletNode = new AudioWorkletNode(audioContext, 'pcm-processor', {
+        numberOfInputs: 1,
+        numberOfOutputs: 0,
+        channelCount: Math.max(1, stream.getAudioTracks()[0]?.getSettings().channelCount ?? 1),
+        channelCountMode: 'explicit',
+      })
 
       pcmChunksRef.current = []
       sampleRateRef.current = audioContext.sampleRate
       audioContextRef.current = audioContext
-      sourceNodeRef.current = sourceNode
-      processorNodeRef.current = processorNode
+      workletNodeRef.current = workletNode
 
       sessionIdRef.current = crypto.randomUUID()
       segmentIndexRef.current = 0
 
-      processorNode.onaudioprocess = event => {
-        pcmChunksRef.current.push(mixToMono(event.inputBuffer))
+      // Primim blocuri de 128 sample-uri de pe Audio Worklet Thread
+      workletNode.port.onmessage = (event: MessageEvent<{ channels: Float32Array[] }>) => {
+        const mono = mixToMono(event.data.channels)
+        pcmChunksRef.current.push(mono)
       }
 
-      sourceNode.connect(processorNode)
-      processorNode.connect(audioContext.destination)
+      sourceNode.connect(workletNode)
 
       segmentTimerRef.current = window.setInterval(() => {
         const currentMeta = sessionMetaRef.current ?? meta

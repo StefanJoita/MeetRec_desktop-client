@@ -8,7 +8,9 @@ Client desktop pentru calculatorul din sala de ședințe. Aplicația captează a
 - login cu user și parolă prin `/api/v1/auth/login`, restore automată a sesiunii
 - înregistrare continuă pe segmente (WAV PCM 16-bit, mono)
 - fiecare sesiune de înregistrare primește un `session_id` unic — toate segmentele aceleiași ședințe sunt grupate pe server ca o singură înregistrare
-- coadă locală persistentă pe disc pentru segmentele netrimise
+- după confirmarea ultimului segment, trimite explicit `POST /api/v1/inbox/session/{id}/complete` pentru a declanșa imediat transcrierea fără a aștepta timeout-ul serverului
+- răspunsul 409 de la `/session/complete` este tratat ca succes (sesiunea a fost deja dispecerizată)
+- coadă locală persistentă pe disc pentru segmentele netrimise; fișierele `.scomplete` de control sunt excluse din operațiunile de patch pentru a evita coruperea lor
 - retry automat la upload la fiecare 5 secunde
 - interfață separată pentru rolul operator (simplu: start/stop) și admin (configurare completă)
 - test conexiune server și test microfon din setări
@@ -76,6 +78,7 @@ Artefactele se generează în `release/`.
 4. Aplicația înregistrează continuu și taie segmente la intervalul configurat (implicit 5 minute).
 5. Fiecare segment e salvat local cu `session_id` și `segment_index`, apoi trimis automat la server.
 6. Dacă serverul nu răspunde, segmentele rămân pe disc și se retrimite automat.
+7. La confirmarea ultimului segment, aplicația apelează `POST /session/complete` — serverul asamblează imediat toate segmentele și pornește transcrierea Whisper.
 
 ## API server — câmpuri trimise la upload
 
@@ -93,6 +96,16 @@ Artefactele se generează în `release/`.
 | `segment_index` | ordinea segmentului (0, 1, 2...) |
 
 `session_id` și `segment_index` permit serverului să grupeze toate segmentele aceleiași ședințe ca o singură înregistrare.
+
+### Semnalizare finalizare sesiune
+
+`POST /api/v1/inbox/session/{session_id}/complete` — `application/json`:
+
+```json
+{ "session_id": "uuid" }
+```
+
+Apelat automat după ce ultimul segment a fost confirmat de server. Răspunsul 409 (sesiune deja dispecerizată) este tratat ca succes.
 
 ## Limitări curente
 

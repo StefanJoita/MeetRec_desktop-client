@@ -77,10 +77,7 @@ src/
       http-client.ts            # apiBase() URL helper + normalizeServerUrl()
   shared/
     hooks/useDevices.ts         # Microphone device enumeration + permission
-  lib/api.ts                    # Legacy API module (still used by old App.tsx)
 ```
-
-**Note:** `src/App.tsx` is the old monolithic implementation (~1100 lines) and is no longer the entry point — `AppShell.tsx` supersedes it. It can be deleted once confirmed unused.
 
 ### Role-Based Routing (`AppShell.tsx`)
 After login, `getUserRole(user)` maps the server-side user object to one of three roles:
