@@ -55,9 +55,10 @@ export async function testConnection(serverUrl: string): Promise<{ ok: boolean; 
       if (err.code === 'ECONNABORTED') {
         return { ok: false, error: 'Timeout — serverul nu a răspuns în 5 secunde.' }
       }
-      // Orice răspuns HTTP înseamnă că serverul există
+      // Un răspuns HTTP cu alt status (ex. 200, 404, 500) înseamnă că URL-ul
+      // pointează spre altceva, nu spre un server MeetRec.
       if (err.response) {
-        return { ok: true }
+        return { ok: false, error: `URL-ul nu pare să fie un server MeetRec (HTTP ${err.response.status}).` }
       }
     }
     return { ok: false, error: 'Eroare de rețea necunoscută.' }

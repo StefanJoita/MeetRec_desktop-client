@@ -7,6 +7,10 @@ export function useQueueSync(token: string | null, serverUrl: string, onUnauthor
   const [draining, setDraining] = useState(false)
   const [error, setError] = useState('')
   const drainingRef = useRef(false)
+  // Ref actualizat la fiecare render — efectul nu trebuie să se remonteze când
+  // onUnauthorized se schimbă, dar apelul trebuie să folosească versiunea curentă.
+  const onUnauthorizedRef = useRef(onUnauthorized)
+  useEffect(() => { onUnauthorizedRef.current = onUnauthorized })
 
   async function refreshQueue() {
     const list = await desktopBridge.queue.list()
@@ -46,7 +50,7 @@ export function useQueueSync(token: string | null, serverUrl: string, onUnauthor
             console.error(`[QueueSync] ${action} HTTP ${result.status}:`, detail)
             if (result.status === 401) {
               setError(`401 Unauthorized${detail ? ` — ${detail}` : ''}. Verifică că serverul rulează.`)
-              onUnauthorized?.()
+              onUnauthorizedRef.current?.()
             } else {
               setError(`${action} (HTTP ${result.status}${detail ? `: ${detail}` : ''}). Se retrimite automat.`)
             }
@@ -60,8 +64,12 @@ export function useQueueSync(token: string | null, serverUrl: string, onUnauthor
         drainingRef.current = false
         setDraining(false)
         if (!cancelled) {
-          const list = await desktopBridge.queue.list()
-          setItems(list)
+          try {
+            const list = await desktopBridge.queue.list()
+            setItems(list)
+          } catch {
+            // IPC failure la refresh final — UI păstrează items anterioare
+          }
         }
       }
     }
@@ -74,7 +82,7 @@ export function useQueueSync(token: string | null, serverUrl: string, onUnauthor
     }
   }, [token, serverUrl])
 
-  const totalBytes = items.reduce((sum, item) => sum + item.sizeBytes, 0)
+  const totalBytes = items.reduce((sum, item) => item.type !== 'session_complete' ? sum + item.sizeBytes : sum, 0)
 
   return { items, draining, error, totalBytes, refreshQueue, deleteItem }
 }

@@ -10,6 +10,8 @@ import type { ClientSettings, QueueItem } from '@/types/electron'
 import type { MicPermissionState } from '@/shared/hooks/useDevices'
 import { testConnection } from '@/infrastructure/api/auth-api'
 import { normalizeServerUrl } from '@/infrastructure/api/http-client'
+import { formatDuration, formatBytes, formatLocalDate } from '@/shared/utils/formatters'
+import { useStartRecordingForm } from '@/shared/hooks/useStartRecordingForm'
 
 type ViewKey = 'overview' | 'settings' | 'account' | 'queue' | 'diagnostics'
 
@@ -41,23 +43,6 @@ type Props = {
   onLogout: () => void
 }
 
-function formatDuration(seconds: number) {
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  const s = seconds % 60
-  const hh = h > 0 ? `${String(h).padStart(2, '0')}:` : ''
-  return `${hh}${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
-}
-
-function formatBytes(value: number) {
-  if (value < 1024) return `${value} B`
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`
-}
-
-function formatLocalDate(isoDate: string) {
-  return new Date(isoDate).toLocaleString('ro-RO')
-}
 
 export function AdminScreen({
   session,
@@ -87,37 +72,11 @@ export function AdminScreen({
   onLogout,
 }: Props) {
   const [activeView, setActiveView] = useState<ViewKey>('overview')
-  const [showStartModal, setShowStartModal] = useState(false)
-  const [showStopModal, setShowStopModal] = useState(false)
-  const [form, setForm] = useState({
-    title: '',
-    participants: '',
-    meetingDate: new Date().toISOString().slice(0, 10),
-    location: settings.location,
-  })
+  const { form, setForm, showStartModal, setShowStartModal, showStopModal, setShowStopModal, openStart, handleStart, handleStop } =
+    useStartRecordingForm(settings.location, onStart, onStop)
   const [testingConn, setTestingConn] = useState(false)
   const [connResult, setConnResult] = useState<{ ok: boolean; error?: string } | null>(null)
   const [deviceTestResult, setDeviceTestResult] = useState<{ ok: boolean; error?: string } | null>(null)
-
-  function openStart() {
-    setForm({ title: '', participants: '', meetingDate: new Date().toISOString().slice(0, 10), location: settings.location })
-    setShowStartModal(true)
-  }
-
-  async function handleStart() {
-    setShowStartModal(false)
-    await onStart({
-      title: form.title.trim(),
-      participants: form.participants.trim(),
-      meetingDate: form.meetingDate,
-      location: form.location.trim() || settings.location,
-    })
-  }
-
-  async function handleStop() {
-    setShowStopModal(false)
-    await onStop()
-  }
 
   async function handleTestConnection() {
     setTestingConn(true)

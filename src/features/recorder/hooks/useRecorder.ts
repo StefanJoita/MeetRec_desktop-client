@@ -92,6 +92,9 @@ export function useRecorder(roomName: string, location: string, segmentDurationS
   const [sessionMeta, setSessionMeta] = useState<RecordingMeta | null>(null)
   const [error, setError] = useState('')
 
+  const segmentDurationRef = useRef(segmentDurationSeconds)
+  segmentDurationRef.current = segmentDurationSeconds
+
   const mediaStreamRef = useRef<MediaStream | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const workletNodeRef = useRef<AudioWorkletNode | null>(null)
@@ -154,7 +157,7 @@ export function useRecorder(roomName: string, location: string, segmentDurationS
 
   async function teardown() {
     if (segmentTimerRef.current !== null) {
-      window.clearInterval(segmentTimerRef.current)
+      window.clearTimeout(segmentTimerRef.current)
       segmentTimerRef.current = null
     }
     if (workletNodeRef.current) {
@@ -244,12 +247,23 @@ export function useRecorder(roomName: string, location: string, segmentDurationS
         pcmChunksRef.current.push(mono)
       }
 
+      workletNode.port.onmessageerror = () => {
+        setError('Eroare internă audio worklet — înregistrarea a fost oprită.')
+        void teardown()
+        setState('idle')
+      }
+
       sourceNode.connect(workletNode)
 
-      segmentTimerRef.current = window.setInterval(() => {
-        const currentMeta = sessionMetaRef.current ?? meta
-        void flush(currentMeta)
-      }, segmentDurationSeconds * 1000)
+      const scheduleNextSegment = () => {
+        segmentTimerRef.current = window.setTimeout(() => {
+          const currentMeta = sessionMetaRef.current ?? meta
+          void flush(currentMeta).then(() => {
+            if (segmentTimerRef.current !== null) scheduleNextSegment()
+          })
+        }, segmentDurationRef.current * 1000)
+      }
+      scheduleNextSegment()
 
       setSessionMeta(meta)
       setState('recording')
@@ -268,10 +282,25 @@ export function useRecorder(roomName: string, location: string, segmentDurationS
     if (state !== 'recording') return
     setState('stopping')
     const currentMeta = sessionMetaRef.current
-    await teardown()
+
+    // 1. Oprește timer-ul periodic — nu mai pornim flush-uri noi
+    if (segmentTimerRef.current !== null) {
+      window.clearTimeout(segmentTimerRef.current)
+      segmentTimerRef.current = null
+    }
+
+    // 2. Așteptăm orice flush periodic deja pornit să se termine
+    await flushPromiseRef.current
+
+    // 3. Flush final cu worklet-ul încă activ — colectăm tot audio-ul rămas
+    //    fără a pierde mesajele PCM în tranzit de la AudioWorklet thread
     if (currentMeta) {
       await flush(currentMeta, true)
     }
+
+    // 4. Abia acum deconectăm și închidem tot
+    await teardown()
+
     setSessionMeta(null)
     setState('idle')
   }

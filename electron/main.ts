@@ -63,6 +63,17 @@ const defaultSettings: ClientSettings = {
 
 let mainWindow: BrowserWindow | null = null
 
+// Mutex pentru operații read-modify-write pe fișierele din coadă.
+// Previne race condition când enqueueSegment și uploadQueueItem rulează concurent
+// pe aceeași sesiune și modifică același fișier JSON sibling.
+let queueWriteLock: Promise<void> = Promise.resolve()
+
+function withQueueLock<T>(fn: () => Promise<T>): Promise<T> {
+  const result = queueWriteLock.then(fn)
+  queueWriteLock = result.then(() => undefined, () => undefined)
+  return result
+}
+
 function getSettingsPath() {
   return path.join(app.getPath('userData'), 'client-settings.json')
 }
@@ -183,19 +194,24 @@ async function enqueueSegment(payload: {
     totalSegments,
   }
 
+  // JSON primul: la crash între cele două scrieri rămâne un JSON fără .audio,
+  // pe care listQueueItems îl ignoră (stat(audioPath) eșuează → return null).
+  // Invers (audio fără JSON) nu ar fi niciodată curățat.
+  await writeFile(path.join(getQueueDir(), `${id}.json`), JSON.stringify(meta), 'utf-8')
   await writeFile(path.join(getQueueDir(), `${id}.audio`), Buffer.from(payload.bytes))
-  await writeFile(path.join(getQueueDir(), `${id}.json`), JSON.stringify(meta, null, 2), 'utf-8')
 
   if (payload.isFinalSegment && totalSegments !== undefined) {
-    const files = await readdir(getQueueDir())
-    for (const file of files.filter(f => f.endsWith('.json') && !f.startsWith('scomplete-'))) {
-      const p = path.join(getQueueDir(), file)
-      const m = JSON.parse(await readFile(p, 'utf-8')) as StoredSegmentMeta
-      if (m.sessionId === payload.sessionId && m.id !== id && m.totalSegments === undefined) {
-        m.totalSegments = totalSegments
-        await writeFile(p, JSON.stringify(m, null, 2), 'utf-8')
+    await withQueueLock(async () => {
+      const files = await readdir(getQueueDir())
+      for (const file of files.filter(f => f.endsWith('.json') && !f.startsWith('scomplete-'))) {
+        const p = path.join(getQueueDir(), file)
+        const m = JSON.parse(await readFile(p, 'utf-8')) as StoredSegmentMeta
+        if (m.sessionId === payload.sessionId && m.id !== id && m.totalSegments === undefined) {
+          m.totalSegments = totalSegments
+          await writeFile(p, JSON.stringify(m), 'utf-8')
+        }
       }
-    }
+    })
   }
 
   return { id }
@@ -209,7 +225,7 @@ async function writeSessionCompleteJob(sessionId: string, totalSegments: number)
     totalSegments,
     createdAt: new Date().toISOString(),
   }
-  await writeFile(path.join(getQueueDir(), `scomplete-${sessionId}.json`), JSON.stringify(job, null, 2), 'utf-8')
+  await writeFile(path.join(getQueueDir(), `scomplete-${sessionId}.json`), JSON.stringify(job), 'utf-8')
 }
 
 async function sendSessionComplete(payload: { id: string; serverUrl: string; token: string }) {
@@ -252,7 +268,7 @@ async function patchSiblingSegments(sessionId: string, uploadedId: string, recor
     const m = JSON.parse(await readFile(metaPath, 'utf-8')) as StoredSegmentMeta
     if (m.sessionId === sessionId && m.id !== uploadedId && !m.existingRecordingId) {
       m.existingRecordingId = recordingId
-      await writeFile(metaPath, JSON.stringify(m, null, 2), 'utf-8')
+      await writeFile(metaPath, JSON.stringify(m), 'utf-8')
     }
   }
 }
@@ -309,7 +325,7 @@ async function uploadQueueItem(payload: { id: string; serverUrl: string; token: 
         : null
     )
     if (recordingId) {
-      await patchSiblingSegments(meta.sessionId, payload.id, recordingId)
+      await withQueueLock(() => patchSiblingSegments(meta.sessionId, payload.id, recordingId))
     }
 
     // Trimite /complete după ultimul segment — fără să depindă de recording_id.

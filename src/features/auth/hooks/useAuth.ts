@@ -50,13 +50,13 @@ export function useAuth() {
     setError('')
     setMustChangePassword(false)
     try {
-      const { access_token } = await login(serverUrl, username, password)
+      const { access_token, expires_in } = await login(serverUrl, username, password)
       const user = await getMe(serverUrl, access_token)
       if (user.must_change_password) {
         setMustChangePassword(true)
         return false
       }
-      sessionStorage.save({ token: access_token, username })
+      sessionStorage.save({ token: access_token, username }, expires_in)
       setSession({ token: access_token, username, user })
       return true
     } catch (err) {

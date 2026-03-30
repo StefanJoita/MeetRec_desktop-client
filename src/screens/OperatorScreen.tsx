@@ -1,5 +1,6 @@
-import { useState } from 'react'
 import { CircleAlert, LogIn, Mic, MicOff, PauseCircle, Users, X } from 'lucide-react'
+import { formatDuration } from '@/shared/utils/formatters'
+import { useStartRecordingForm } from '@/shared/hooks/useStartRecordingForm'
 import type { RecorderState, RecordingMeta } from '@/features/recorder/hooks/useRecorder'
 import type { SessionState } from '@/features/auth/hooks/useAuth'
 
@@ -22,13 +23,6 @@ type Props = {
   onLogout: () => void
 }
 
-function formatDuration(seconds: number) {
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  const s = seconds % 60
-  const hh = h > 0 ? `${String(h).padStart(2, '0')}:` : ''
-  return `${hh}${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
-}
 
 export function OperatorScreen({
   session,
@@ -42,34 +36,8 @@ export function OperatorScreen({
   onStop,
   onLogout,
 }: Props) {
-  const [showStartModal, setShowStartModal] = useState(false)
-  const [showStopModal, setShowStopModal] = useState(false)
-  const [form, setForm] = useState({
-    title: '',
-    participants: '',
-    meetingDate: new Date().toISOString().slice(0, 10),
-    location: settings.location,
-  })
-
-  function openStart() {
-    setForm({ title: '', participants: '', meetingDate: new Date().toISOString().slice(0, 10), location: settings.location })
-    setShowStartModal(true)
-  }
-
-  async function handleStart() {
-    setShowStartModal(false)
-    await onStart({
-      title: form.title.trim(),
-      participants: form.participants.trim(),
-      meetingDate: form.meetingDate,
-      location: form.location.trim() || settings.location,
-    })
-  }
-
-  async function handleStop() {
-    setShowStopModal(false)
-    await onStop()
-  }
+  const { form, setForm, showStartModal, setShowStartModal, showStopModal, setShowStopModal, openStart, handleStart, handleStop } =
+    useStartRecordingForm(settings.location, onStart, onStop)
 
   return (
     <>
