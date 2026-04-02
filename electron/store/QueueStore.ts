@@ -104,20 +104,18 @@ export const QueueStore = {
     const db = getDb()
     const ts = now()
 
-    return db.transaction(() => {
-      const rows = db.prepare(
-        "SELECT * FROM segments WHERE status = 'pending' ORDER BY segment_index ASC LIMIT ?"
-      ).all(limit) as SegmentRow[]
+    const rows = db.prepare(
+      "SELECT * FROM segments WHERE status = 'pending' ORDER BY segment_index ASC LIMIT ?"
+    ).all(limit) as SegmentRow[]
 
-      if (rows.length === 0) return []
+    if (rows.length === 0) return []
 
-      const placeholders = rows.map(() => '?').join(',')
-      db.prepare(
-        `UPDATE segments SET status = 'uploading', updated_at = ? WHERE id IN (${placeholders})`
-      ).run(ts, ...rows.map(r => r.id))
+    const placeholders = rows.map(() => '?').join(',')
+    db.prepare(
+      `UPDATE segments SET status = 'uploading', updated_at = ? WHERE id IN (${placeholders})`
+    ).run(ts, ...rows.map(r => r.id))
 
-      return rows
-    })()
+    return rows
   },
 
   getNextCompletePending(): SegmentRow | undefined {
