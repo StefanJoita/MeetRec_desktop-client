@@ -1,24 +1,37 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { CircleAlert, LogIn } from 'lucide-react'
+import type { ClientSettings } from '@/types/electron'
 
-type Props = {
-  serverUrl: string
-  loading: boolean
+interface Props {
+  onLogin: (serverUrl: string, username: string, password: string) => Promise<string | null>
+  settings: ClientSettings
   error: string
-  mustChangePassword: boolean
-  onLogin: (username: string, password: string) => Promise<boolean>
+  loading: boolean
 }
 
-export function LoginScreen({ serverUrl, loading, error, mustChangePassword, onLogin }: Props) {
+export function LoginScreen({ onLogin, settings, error, loading }: Props) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [localError, setLocalError] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
-    await onLogin(username, password)
-    setPassword('')
+    setLocalError('')
+    setIsSubmitting(true)
+    try {
+      const result = await onLogin(settings.serverUrl, username, password)
+      if (result !== null) {
+        setLocalError(result)
+      }
+    } finally {
+      setPassword('')
+      setIsSubmitting(false)
+    }
   }
+
+  const displayError = localError || error
 
   return (
     <main className="login-shell">
@@ -27,23 +40,15 @@ export function LoginScreen({ serverUrl, loading, error, mustChangePassword, onL
         <h1>Conectare</h1>
 
         <p style={{ color: '#7a9a8a', fontSize: '0.88rem', margin: '0 0 16px' }}>
-          Server: <strong style={{ color: '#adc1b4' }}>{serverUrl}</strong>
+          Server: <strong style={{ color: '#adc1b4' }}>{settings.serverUrl}</strong>
         </p>
 
-        {mustChangePassword ? (
-          <div className="message message-warning" style={{ marginBottom: 14 }}>
-            <CircleAlert size={18} style={{ flexShrink: 0, marginTop: 2 }} />
-            <div>
-              <strong>Schimbare parolă necesară</strong>
-              <p>Contul tău necesită o nouă parolă. Deschide aplicația web MeetRec, setează o parolă nouă, apoi revino aici.</p>
-            </div>
-          </div>
-        ) : error ? (
+        {displayError && (
           <div className="message message-error" style={{ marginBottom: 14 }}>
             <CircleAlert size={18} style={{ flexShrink: 0 }} />
-            <span>{error}</span>
+            <span>{displayError}</span>
           </div>
-        ) : null}
+        )}
 
         <form className="stack-form" onSubmit={e => void handleSubmit(e)}>
           <label>
@@ -52,7 +57,7 @@ export function LoginScreen({ serverUrl, loading, error, mustChangePassword, onL
               value={username}
               onChange={e => setUsername(e.target.value)}
               placeholder="operator.sala"
-              disabled={loading}
+              disabled={isSubmitting || loading}
               autoComplete="username"
               autoFocus
             />
@@ -64,17 +69,17 @@ export function LoginScreen({ serverUrl, loading, error, mustChangePassword, onL
               value={password}
               onChange={e => setPassword(e.target.value)}
               placeholder="••••••••"
-              disabled={loading}
+              disabled={isSubmitting || loading}
               autoComplete="current-password"
             />
           </label>
           <button
             className="primary-button"
             type="submit"
-            disabled={loading || !username.trim() || !password}
+            disabled={isSubmitting || loading || !username.trim() || !password}
           >
             <LogIn size={18} />
-            {loading ? 'Se conectează...' : 'Conectare'}
+            {isSubmitting || loading ? 'Se conectează...' : 'Conectare'}
           </button>
         </form>
       </section>

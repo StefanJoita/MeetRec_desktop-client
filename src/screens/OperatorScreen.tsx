@@ -1,121 +1,51 @@
-import { CircleAlert, LogIn, Mic, MicOff, PauseCircle, Users, X } from 'lucide-react'
-import { formatDuration } from '@/shared/utils/formatters'
-import { useStartRecordingForm } from '@/shared/hooks/useStartRecordingForm'
-import type { RecorderState, RecordingMeta } from '@/features/recorder/hooks/useRecorder'
-import type { SessionState } from '@/features/auth/hooks/useAuth'
+import { useState } from 'react'
+import { LogIn, Mic, MicOff, PauseCircle } from 'lucide-react'
+import { RecorderStatus } from '@/components/RecorderStatus'
+import { StartMeetingModal } from '@/components/StartMeetingModal'
+import type {
+  AuthUser,
+  ClientSettings,
+  QueueStats,
+  SessionStatePayload,
+  StartSessionPayload,
+} from '@/types/electron'
 
-type QueueStatus = {
-  count: number
-  draining: boolean
-  error: string
+interface Props {
+  user: AuthUser
+  session: SessionStatePayload
+  queue: QueueStats
+  settings: ClientSettings
+  selectedDevice: string
+  onStartSession: (payload: StartSessionPayload) => Promise<string | null>
+  onStopSession: () => Promise<void>
+  onLogout: () => Promise<void>
 }
-
-type Props = {
-  session: SessionState
-  settings: { roomName: string; location: string }
-  recorderState: RecorderState
-  elapsedSeconds: number
-  sessionMeta: RecordingMeta | null
-  recorderError: string
-  queue: QueueStatus
-  onStart: (meta: RecordingMeta) => Promise<void>
-  onStop: () => Promise<void>
-  onLogout: () => void
-}
-
 
 export function OperatorScreen({
+  user,
   session,
-  settings,
-  recorderState,
-  elapsedSeconds,
-  sessionMeta,
-  recorderError,
   queue,
-  onStart,
-  onStop,
+  settings,
+  selectedDevice,
+  onStartSession,
+  onStopSession,
   onLogout,
 }: Props) {
-  const { form, setForm, showStartModal, setShowStartModal, showStopModal, setShowStopModal, openStart, handleStart, handleStop } =
-    useStartRecordingForm(settings.location, onStart, onStop)
+  const [showStartModal, setShowStartModal] = useState(false)
+
+  const isIdle = session.state === 'idle'
+  const isRecording = session.state === 'recording'
+  const isStopping = session.state === 'stopping'
 
   return (
     <>
-      {/* Start modal */}
       {showStartModal && (
-        <div className="modal-overlay">
-          <div className="modal card">
-            <div className="modal-header">
-              <h2>Începe ședința</h2>
-              <button className="icon-button" onClick={() => setShowStartModal(false)} aria-label="Închide">
-                <X size={20} />
-              </button>
-            </div>
-            <div className="stack-form">
-              <label>
-                <span>Titlu ședință <em className="required">*</em></span>
-                <input
-                  value={form.title}
-                  onChange={e => setForm(f => ({ ...f, title: e.target.value }))}
-                  placeholder="ex: Ședință de management"
-                  autoFocus
-                />
-              </label>
-              <label>
-                <span>Participanți <em className="field-hint">(separați prin virgulă)</em></span>
-                <input
-                  value={form.participants}
-                  onChange={e => setForm(f => ({ ...f, participants: e.target.value }))}
-                  placeholder="Alice, Bob, Carol"
-                />
-              </label>
-              <label>
-                <span>Data ședinței</span>
-                <input
-                  type="date"
-                  value={form.meetingDate}
-                  onChange={e => setForm(f => ({ ...f, meetingDate: e.target.value }))}
-                />
-              </label>
-              <label>
-                <span>Locație</span>
-                <input
-                  value={form.location}
-                  onChange={e => setForm(f => ({ ...f, location: e.target.value }))}
-                  placeholder={settings.location}
-                />
-              </label>
-            </div>
-            <div className="modal-actions">
-              <button className="secondary-button" onClick={() => setShowStartModal(false)}>Anulează</button>
-              <button
-                className="primary-button"
-                onClick={() => void handleStart()}
-                disabled={!form.title.trim()}
-              >
-                <Mic size={18} />
-                Pornește înregistrarea
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Stop modal */}
-      {showStopModal && (
-        <div className="modal-overlay">
-          <div className="modal modal-sm card">
-            <h2>Încheie ședința?</h2>
-            <p>Înregistrarea va fi oprită. Segmentele salvate vor fi trimise automat la server.</p>
-            <div className="modal-actions">
-              <button className="secondary-button" onClick={() => setShowStopModal(false)}>Continuă înregistrarea</button>
-              <button className="primary-button danger" onClick={() => void handleStop()}>
-                <PauseCircle size={18} />
-                Încheie ședința
-              </button>
-            </div>
-          </div>
-        </div>
+        <StartMeetingModal
+          settings={settings}
+          selectedDevice={selectedDevice}
+          onStart={onStartSession}
+          onClose={() => setShowStartModal(false)}
+        />
       )}
 
       <main className="operator-shell">
@@ -123,82 +53,83 @@ export function OperatorScreen({
           <div className="operator-header">
             <div>
               <p className="eyebrow">MeetRec · {settings.roomName}</p>
-              <p className="operator-user">{session.user.full_name || session.user.username}</p>
+              <p className="operator-user">
+                {user.full_name || user.username}
+              </p>
             </div>
-            <button className="icon-text-button" onClick={onLogout}>
+            <button className="icon-text-button" onClick={() => void onLogout()}>
               <LogIn size={15} />
               Logout
             </button>
           </div>
 
-          {recorderState === 'idle' && (
+          {isIdle && (
             <div className="operator-body">
-              <div className="operator-idle-icon"><MicOff size={44} /></div>
+              <div className="operator-idle-icon">
+                <MicOff size={44} />
+              </div>
               <h1 className="operator-state-label">În așteptare</h1>
               <p className="operator-state-sub">Nu există o înregistrare activă.</p>
-              {recorderError && (
-                <div className="message message-error operator-message" style={{ textAlign: 'left' }}>
-                  <CircleAlert size={18} style={{ flexShrink: 0, marginTop: 2 }} />
-                  <div>
-                    <strong style={{ display: 'block', marginBottom: 4 }}>{recorderError}</strong>
-                    <span style={{ fontSize: '0.82rem', opacity: 0.8 }}>
-                      Verifică: Setări Windows → Confidențialitate și securitate → Microfon → activează pentru aplicații desktop
-                    </span>
-                  </div>
-                </div>
-              )}
-              <button className="primary-button operator-main-btn" onClick={openStart}>
+              <button
+                className="primary-button operator-main-btn"
+                onClick={() => setShowStartModal(true)}
+              >
                 <Mic size={22} />
                 Începe ședința
               </button>
             </div>
           )}
 
-          {recorderState === 'stopping' && (
+          {isStopping && (
             <div className="operator-body">
               <h1 className="operator-state-label">Oprire în curs...</h1>
-              <p className="operator-state-sub">Ultimul segment este salvat și pus în coadă.</p>
+              <p className="operator-state-sub">
+                Ultimul segment este salvat și pus în coadă.
+              </p>
+              <RecorderStatus session={session} />
             </div>
           )}
 
-          {recorderState === 'recording' && (
+          {isRecording && (
             <div className="operator-body">
               <div className="recording-indicator">
                 <span className="pulse-dot" />
                 <span className="pulse-ring" />
               </div>
               <p className="operator-rec-badge">ÎNREGISTREAZĂ</p>
-              <div className="operator-timer">{formatDuration(elapsedSeconds)}</div>
-              {sessionMeta && (
+              <RecorderStatus session={session} />
+              {session.meta && (
                 <div className="operator-session-info">
-                  <strong>{sessionMeta.title}</strong>
-                  {sessionMeta.participants && (
-                    <p><Users size={13} style={{ flexShrink: 0 }} /> {sessionMeta.participants}</p>
+                  <strong>{session.meta.title}</strong>
+                  {session.meta.participants && (
+                    <p>{session.meta.participants}</p>
                   )}
                 </div>
               )}
-              {recorderError && (
-                <div className="message message-error operator-message">
-                  <CircleAlert size={18} style={{ flexShrink: 0 }} />
-                  <span>{recorderError}</span>
-                </div>
-              )}
-              <button className="primary-button danger operator-main-btn" onClick={() => setShowStopModal(true)}>
+              <button
+                className="primary-button danger operator-main-btn"
+                onClick={() => void onStopSession()}
+                disabled={isStopping}
+              >
                 <PauseCircle size={22} />
                 Încheie ședința
               </button>
             </div>
           )}
 
-          <div className={`upload-status-bar ${queue.draining ? 'syncing' : queue.error ? 'error' : 'ok'}`}>
+          <div
+            className={`upload-status-bar ${
+              queue.isUploading ? 'syncing' : queue.errorCount > 0 ? 'error' : 'ok'
+            }`}
+          >
             <span className="upload-dot" />
             <span>
-              {queue.draining
-                ? `Sincronizare în curs (${queue.count} segmente)...`
-                : queue.error
-                  ? queue.error
-                  : queue.count
-                    ? `${queue.count} ${queue.count === 1 ? 'segment' : 'segmente'} în coadă`
+              {queue.isUploading
+                ? `Sincronizare în curs (${queue.pending} segmente)...`
+                : queue.errorCount > 0
+                  ? `${queue.errorCount} erori upload`
+                  : queue.pending > 0
+                    ? `${queue.pending} ${queue.pending === 1 ? 'segment' : 'segmente'} în coadă`
                     : 'Toate segmentele au fost trimise'}
             </span>
           </div>

@@ -1,168 +1,134 @@
-import { useEffect } from 'react'
-import { useAuth, getUserRole } from '@/features/auth/hooks/useAuth'
-import { useSettings } from '@/features/settings/hooks/useSettings'
-import { useDevices } from '@/shared/hooks/useDevices'
-import { useRecorder } from '@/features/recorder/hooks/useRecorder'
-import { useQueueSync } from '@/features/queue/hooks/useQueueSync'
-import { SetupWizard } from '@/features/setup/SetupWizard'
-import { LoginScreen } from '@/features/auth/LoginScreen'
+import { useState } from 'react'
+import { useMainState } from '@/hooks/useMainState'
+import { useCapture } from '@/hooks/useCapture'
+import { useDevices } from '@/hooks/useDevices'
+import { LoginScreen } from '@/screens/LoginScreen'
+import { SetupWizard } from '@/screens/SetupWizard'
 import { OperatorScreen } from '@/screens/OperatorScreen'
 import { AdminScreen } from '@/screens/AdminScreen'
 import { ParticipantBlockedScreen } from '@/screens/ParticipantBlockedScreen'
+import type { AuthUser } from '@/types/electron'
+
+function getUserRole(user: AuthUser): 'admin' | 'operator' | 'participant' {
+  if (user.role === 'admin' || user.role === 'operator' || user.role === 'participant') {
+    return user.role
+  }
+  if (user.is_admin) return 'admin'
+  if (user.is_participant) return 'participant'
+  return 'operator'
+}
 
 export function AppShell() {
+  const state = useMainState()
   const {
+    authLoading,
+    user,
+    settingsLoading,
     settings,
-    setSettings,
-    initialized: settingsInitialized,
-    saving: savingSettings,
-    error: settingsError,
-    saved: settingsSaved,
-    loadSettings,
-    saveSettings,
-  } = useSettings()
-
-  const {
     session,
-    loading: authLoading,
-    error: authError,
-    mustChangePassword,
-    restoreSession,
-    handleLogin,
+    queue,
+    queueItems,
+    queueItemsLoading,
+    login,
     logout,
-  } = useAuth()
+    saveSettings,
+    startSession,
+    stopSession,
+    refreshQueueItems,
+    deleteSegment,
+    retrySegment,
+    pingServer,
+  } = state
 
-  const {
-    devices,
-    selectedDeviceId,
-    setSelectedDeviceId,
-    selectedLabel: selectedDeviceLabel,
-    permissionState,
-    requestPermission,
-  } = useDevices()
+  // useCapture runs as a side-effect only — starts/stops AudioWorklet in response to push events
+  useCapture()
 
-  const {
-    state: recorderState,
-    elapsedSeconds,
-    sessionMeta,
-    error: recorderError,
-    start: startRecording,
-    stop: stopRecording,
-  } = useRecorder(settings.roomName, settings.location, settings.segmentDurationSeconds)
+  // Device enumeration — pornește doar după login (evită promptul de microfon pe login/setup)
+  const { selectedDevice } = useDevices(!!user)
 
-  const {
-    items: queueItems,
-    draining: queueDraining,
-    error: queueError,
-    totalBytes: queueTotalBytes,
-    deleteItem: deleteQueueItem,
-  } = useQueueSync(session?.token ?? null, settings.serverUrl, handleLogout)
+  // Track settingsSaving state locally (SettingsForm manages its own internal saving state,
+  // but AdminScreen accepts a prop for external indication if needed)
+  const [settingsSaving, setSettingsSaving] = useState(false)
 
-  // Init
-  useEffect(() => {
-    void (async () => {
-      const loaded = await loadSettings()
-      if (loaded.setupComplete) {
-        await restoreSession(loaded)
-      }
-    })()
-  }, [])
-
-  function handleStart(meta: Parameters<typeof startRecording>[0]) {
-    return startRecording(meta, selectedDeviceId)
+  async function handleSaveSettings(updates: Parameters<typeof saveSettings>[0]) {
+    setSettingsSaving(true)
+    try {
+      await saveSettings(updates)
+    } finally {
+      setSettingsSaving(false)
+    }
   }
 
-  async function handleLogout() {
-    if (recorderState === 'recording') await stopRecording()
-    logout()
+  // ─── Loading ────────────────────────────────────────────────────────────────
+  if (authLoading || settingsLoading) {
+    return null
   }
 
-  // — Așteptăm încărcarea setărilor de pe disk înainte de orice randare —
-  if (!settingsInitialized) return null
-
-  // — Setup wizard —
+  // ─── Setup wizard ───────────────────────────────────────────────────────────
   if (!settings.setupComplete) {
     return (
       <SetupWizard
         settings={settings}
-        onSettingsChange={updates => setSettings(s => ({ ...s, ...updates }))}
-        onSave={async updates => { await saveSettings(updates) }}
-        permissionState={permissionState}
-        devices={devices}
-        selectedDeviceId={selectedDeviceId}
-        onSelectDevice={setSelectedDeviceId}
-        onRequestPermission={requestPermission}
-        onComplete={async () => { /* setupComplete saved by wizard */ }}
+        onComplete={saveSettings}
+        pingServer={pingServer}
       />
     )
   }
 
-  // — Login —
-  if (!session) {
+  // ─── Login ──────────────────────────────────────────────────────────────────
+  if (!user) {
     return (
       <LoginScreen
-        serverUrl={settings.serverUrl}
-        loading={authLoading}
-        error={authError}
-        mustChangePassword={mustChangePassword}
-        onLogin={(username, password) => handleLogin(settings.serverUrl, username, password)}
+        settings={settings}
+        onLogin={login}
+        error=""
+        loading={false}
       />
     )
   }
 
-  const role = getUserRole(session.user)
+  const role = getUserRole(user)
 
-  // — Participant blocked —
+  // ─── Participant blocked ────────────────────────────────────────────────────
   if (role === 'participant') {
-    return <ParticipantBlockedScreen onLogout={handleLogout} />
+    return <ParticipantBlockedScreen onLogout={logout} />
   }
 
-  // — Operator —
+  // ─── Operator ───────────────────────────────────────────────────────────────
   if (role === 'operator') {
     return (
       <OperatorScreen
+        user={user}
         session={session}
+        queue={queue}
         settings={settings}
-        recorderState={recorderState}
-        elapsedSeconds={elapsedSeconds}
-        sessionMeta={sessionMeta}
-        recorderError={recorderError}
-        queue={{ count: queueItems.length, draining: queueDraining, error: queueError }}
-        onStart={handleStart}
-        onStop={stopRecording}
-        onLogout={handleLogout}
+        selectedDevice={selectedDevice}
+        onStartSession={startSession}
+        onStopSession={stopSession}
+        onLogout={logout}
       />
     )
   }
 
-  // — Admin —
+  // ─── Admin ──────────────────────────────────────────────────────────────────
   return (
     <AdminScreen
+      user={user}
       session={session}
-      settings={settings}
-      onSettingsChange={updates => setSettings(s => ({ ...s, ...updates }))}
-      onSaveSettings={updates => saveSettings(updates ?? {})}
-      savingSettings={savingSettings}
-      settingsError={settingsError}
-      settingsSaved={settingsSaved}
-      recorderState={recorderState}
-      elapsedSeconds={elapsedSeconds}
-      sessionMeta={sessionMeta}
-      recorderError={recorderError}
+      queue={queue}
       queueItems={queueItems}
-      queueDraining={queueDraining}
-      queueError={queueError}
-      queueTotalBytes={queueTotalBytes}
-      onDeleteQueueItem={deleteQueueItem}
-      devices={devices}
-      selectedDeviceId={selectedDeviceId}
-      selectedDeviceLabel={selectedDeviceLabel}
-      permissionState={permissionState}
-      onSelectDevice={setSelectedDeviceId}
-      onRequestPermission={requestPermission}
-      onStart={handleStart}
-      onStop={stopRecording}
-      onLogout={handleLogout}
+      queueItemsLoading={queueItemsLoading}
+      settings={settings}
+      selectedDevice={selectedDevice}
+      onStartSession={startSession}
+      onStopSession={stopSession}
+      onLogout={logout}
+      onSaveSettings={handleSaveSettings}
+      settingsSaving={settingsSaving}
+      onDeleteSegment={deleteSegment}
+      onRetrySegment={retrySegment}
+      onRefreshQueue={refreshQueueItems}
+      pingServer={pingServer}
     />
   )
 }

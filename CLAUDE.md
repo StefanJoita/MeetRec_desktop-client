@@ -39,44 +39,34 @@ MeetRec Server (/api/v1/*)
 
 ### Electron Main Process (`electron/main.ts`)
 Handles infrastructure concerns only:
-- Settings persistence to `userData/client-settings.json`
-- Upload queue management in `userData/upload-queue/` (JSON metadata + WAV files)
-- IPC handlers exposed via two namespaces: `settings` and `queue`
+- Settings persistence in SQLite (`userData/meetrec.db`)
+- Upload queue persistence in SQLite (`segments` table) + WAV files in `userData/segments/`
+- IPC handlers exposed via channels like `auth:*`, `settings:*`, `session:*`, `queue:*`, `diag:*`, `capture:*`
 
 ### IPC Bridge (`electron/preload.ts`)
-Context-isolated bridge exposing `window.meetrecDesktop` to the renderer. TypeScript types in `src/types/electron.d.ts`. The renderer accesses it only through `src/infrastructure/desktop-bridge.ts`.
+Context-isolated bridge exposing `window.meetrecDesktop` to the renderer. TypeScript types live in `src/types/electron.d.ts`. The renderer should call `window.meetrecDesktop.*` methods directly (no extra wrapper).
 
-### React Renderer — Feature Architecture
-Entry point is `src/main.tsx` → `src/app/AppShell.tsx`. The app is decomposed into feature modules:
+### React Renderer
+Entry point is `src/main.tsx` → `src/app/AppShell.tsx`. The renderer is UI + microphone capture only; all stateful business logic runs in Electron main.
 
 ```
 src/
-  app/AppShell.tsx              # Root component: composes all hooks and routes to screens
-  features/
-    auth/
-      hooks/useAuth.ts          # Login, session restore, logout state
-      LoginScreen.tsx           # Login UI
-    recorder/
-      hooks/useRecorder.ts      # Web Audio API, WAV encoding, segment dispatch
-    queue/
-      hooks/useQueueSync.ts     # 5s polling loop, upload retry, queue state
-    settings/
-      hooks/useSettings.ts      # Load/save settings via IPC
-    setup/
-      SetupWizard.tsx           # First-run wizard (server URL, room, microphone)
-      hooks/useSetupFlow.ts
+  app/AppShell.tsx              # Root component: routes to screens based on state/role
+  hooks/
+    useMainState.ts             # Subscribes to all main push events + invokes commands
+    useCapture.ts               # AudioWorklet lifecycle; streams PCM to main
+    useDevices.ts               # Microphone device enumeration
   screens/
-    OperatorScreen.tsx          # Simplified recorder UI for operator role
-    AdminScreen.tsx             # Full UI: recorder + settings + queue + diagnostics
+    LoginScreen.tsx
+    SetupWizard.tsx
+    OperatorScreen.tsx
+    AdminScreen.tsx
     ParticipantBlockedScreen.tsx
-  infrastructure/
-    desktop-bridge.ts           # Thin wrapper around window.meetrecDesktop IPC
-    session-storage.ts          # localStorage wrapper for token persistence
-    api/
-      auth-api.ts               # login(), getMe(), testConnection()
-      http-client.ts            # apiBase() URL helper + normalizeServerUrl()
-  shared/
-    hooks/useDevices.ts         # Microphone device enumeration + permission
+  components/
+    RecorderStatus.tsx
+    QueuePanel.tsx
+    SettingsForm.tsx
+    StartMeetingModal.tsx
 ```
 
 ### Role-Based Routing (`AppShell.tsx`)
@@ -85,22 +75,24 @@ After login, `getUserRole(user)` maps the server-side user object to one of thre
 - `operator` → `OperatorScreen` (recorder only, no settings)
 - `participant` → `ParticipantBlockedScreen` (no access)
 
-### HTTP API (`src/infrastructure/api/auth-api.ts`)
+### HTTP API
+All HTTP calls happen in Electron main services:
 - `POST /api/v1/auth/login` — returns JWT
 - `GET /api/v1/auth/me` — session verification + user profile
-- `POST /api/v1/inbox/upload` — multipart WAV upload (handled in Electron main via queue)
+- `POST /api/v1/inbox/upload` — multipart WAV upload
+- `POST /api/v1/inbox/session/{session_id}/complete` — finalize session
 
 ### Data Flow
-1. Web Audio API captures microphone input (`useRecorder`)
-2. ScriptProcessorNode buffers PCM samples; on segment boundary, samples are WAV-encoded
-3. WAV blob + metadata JSON are sent to Electron main via `desktopBridge.queue.enqueue()`
-4. `useQueueSync` polls every 5 seconds and calls `desktopBridge.queue.upload()` per item
-5. Electron main POSTs to the server; successfully uploaded segments are deleted from disk
+1. Renderer captures microphone input via AudioWorklet (`src/hooks/useCapture.ts`)
+2. PCM chunks are sent as Transferable buffers to Electron main (`capture:pcm-chunk`)
+3. Main accumulates PCM, encodes WAV, writes to disk, and inserts a `segments` row in SQLite
+4. `UploadWorker` drains the queue and uploads segments with retry/backoff
+5. Final segment triggers `/session/{id}/complete`; on completion, WAVs are deleted
 
 ## Key Design Notes
 
-- **WAV encoding** is in `useRecorder` — 44-byte header + 16-bit PCM, multi-channel mixed to mono.
+- **WAV encoding** happens in Electron main (`electron/audio/wav-encoder.ts`).
 - **Segment duration** is configurable (30s–3600s) via settings.
 - **Queue persistence** survives app restarts — uploads resume automatically on next launch.
 - **Path alias**: `@/` maps to `src/` in both Vite and TypeScript configs.
-- **`testConnection()`** in `auth-api.ts` uses a probe request to `GET /auth/me` with a dummy token; a 401 or 403 response counts as "server reachable".
+- **Server reachability check** uses a probe request to `GET /auth/me` with a dummy token; a 401 or 403 response counts as \"server reachable\".

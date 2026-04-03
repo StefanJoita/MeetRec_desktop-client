@@ -149,6 +149,11 @@ export class UploadWorker {
       if (segment.total_segments != null) {
         form.append('total_segments', String(segment.total_segments))
       }
+      form.append('title', segment.title)
+      form.append('room_name', segment.room_name)
+      form.append('location', segment.location)
+      form.append('participants', segment.participants)
+      form.append('meeting_date', segment.meeting_date)
 
       // Timeout dinamic: minim 60s, mai lung pentru segmente mari (~5KB/s minim)
       const timeoutMs = Math.max(60_000, Math.ceil(segment.audio_bytes / 5_000))
@@ -199,12 +204,6 @@ export class UploadWorker {
     const hasFinal = rows.some(r => r.is_final)
     if (!hasFinal) return
 
-    // Toate segmentele trebuie să fie uploadate (niciun pending sau uploading)
-    const allDone = rows.every(
-      r => r.status === 'uploaded' || r.status === 'completed' || r.status === 'complete_pending',
-    )
-    if (!allDone) return
-
     const hasFailed = rows.some(r => r.status === 'dead' || r.status === 'error')
     if (hasFailed) {
       console.warn(`[UploadWorker] Session ${sessionId} has failed segments — skipping /complete`)
@@ -212,6 +211,12 @@ export class UploadWorker {
       if (finalRow) this.queueStore.setStatus(finalRow.id, 'completed')
       return
     }
+
+    // Toate segmentele trebuie să fie uploadate (niciun pending sau uploading)
+    const allDone = rows.every(
+      r => r.status === 'uploaded' || r.status === 'completed' || r.status === 'complete_pending',
+    )
+    if (!allDone) return
 
     // Marcăm segmentul final ca complete_pending și trimitem /complete
     const finalRow = rows.find(r => r.is_final && r.status === 'uploaded')

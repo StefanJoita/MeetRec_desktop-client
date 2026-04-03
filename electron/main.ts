@@ -1,414 +1,118 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow } from 'electron'
 import path from 'node:path'
-import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
-import { randomUUID } from 'node:crypto'
+import fs from 'node:fs'
+import { initDatabase } from './store/Database'
+import { QueueStore } from './store/QueueStore'
+import { AuthService } from './services/AuthService'
+import { SettingsService } from './services/SettingsService'
+import { SessionController } from './services/SessionController'
+import { UploadWorker } from './services/UploadWorker'
+import { PcmAccumulator } from './capture/PcmAccumulator'
+import { registerIpcHandlers } from './ipc/ipc-handlers'
+import { pushToRenderer } from './ipc/ipc-push'
+import { IPC } from '../shared/ipc-constants'
 
-type ClientSettings = {
-  serverUrl: string
-  roomName: string
-  location: string
-  segmentDurationSeconds: number
-  setupComplete: boolean
-}
+app.whenReady().then(() => {
+  // 1. Initialise SQLite database and run migrations
+  initDatabase()
 
-type StoredSegmentMeta = {
-  id: string
-  fileName: string
-  mimeType: string
-  createdAt: string
-  roomName: string
-  location: string
-  meetingDate: string
-  title: string
-  participants: string
-  sessionId: string
-  segmentIndex: number
-  totalSegments?: number
-  existingRecordingId?: string
-}
+  // 2. Reset segments that were left in 'uploading' state by a previous crash
+  QueueStore.resetStaleUploading()
 
-type SessionCompleteJob = {
-  id: string
-  type: 'session_complete'
-  sessionId: string
-  totalSegments: number
-  createdAt: string
-}
-
-type QueueItem = {
-  id: string
-  fileName: string
-  mimeType: string
-  createdAt: string
-  sizeBytes: number
-  title: string
-  roomName: string
-  location: string
-  participants: string
-  meetingDate: string
-  sessionId: string
-  segmentIndex: number
-  totalSegments?: number
-  existingRecordingId?: string
-  type?: 'upload' | 'session_complete'
-}
-
-const defaultSettings: ClientSettings = {
-  serverUrl: 'http://localhost:8080',
-  roomName: 'Sala de sedinte',
-  location: 'Sediu principal',
-  segmentDurationSeconds: 300,
-  setupComplete: false,
-}
-
-let mainWindow: BrowserWindow | null = null
-
-// Mutex pentru operații read-modify-write pe fișierele din coadă.
-// Previne race condition când enqueueSegment și uploadQueueItem rulează concurent
-// pe aceeași sesiune și modifică același fișier JSON sibling.
-let queueWriteLock: Promise<void> = Promise.resolve()
-
-function withQueueLock<T>(fn: () => Promise<T>): Promise<T> {
-  const result = queueWriteLock.then(fn)
-  queueWriteLock = result.then(() => undefined, () => undefined)
-  return result
-}
-
-function getSettingsPath() {
-  return path.join(app.getPath('userData'), 'client-settings.json')
-}
-
-function getQueueDir() {
-  return path.join(app.getPath('userData'), 'upload-queue')
-}
-
-function normalizeServerUrl(rawUrl: string) {
-  const trimmed = rawUrl.trim().replace(/\/$/, '')
-  if (trimmed.endsWith('/api/v1')) {
-    return trimmed.slice(0, -7)
-  }
-  return trimmed
-}
-
-async function ensureAppStorage() {
-  await mkdir(getQueueDir(), { recursive: true })
-}
-
-async function loadSettings(): Promise<ClientSettings> {
-  try {
-    const file = await readFile(getSettingsPath(), 'utf-8')
-    return { ...defaultSettings, ...(JSON.parse(file) as Partial<ClientSettings>) }
-  } catch {
-    return defaultSettings
-  }
-}
-
-async function saveSettings(settings: ClientSettings) {
-  await writeFile(getSettingsPath(), JSON.stringify(settings, null, 2), 'utf-8')
-  return settings
-}
-
-async function listQueueItems(): Promise<QueueItem[]> {
-  await ensureAppStorage()
-  const files = await readdir(getQueueDir())
-
-  const uploadFiles = files.filter(f => f.endsWith('.json') && !f.startsWith('scomplete-'))
-  const completeFiles = files.filter(f => f.startsWith('scomplete-') && f.endsWith('.json'))
-
-  const uploadItems = await Promise.all(
-    uploadFiles.map(async file => {
-      const metaPath = path.join(getQueueDir(), file)
-      const meta = JSON.parse(await readFile(metaPath, 'utf-8')) as StoredSegmentMeta
-      const audioPath = path.join(getQueueDir(), `${meta.id}.audio`)
-      try {
-        const info = await stat(audioPath)
-        return {
-          id: meta.id,
-          fileName: meta.fileName,
-          mimeType: meta.mimeType,
-          createdAt: meta.createdAt,
-          sizeBytes: info.size,
-          title: meta.title,
-          roomName: meta.roomName,
-          location: meta.location,
-          participants: meta.participants ?? '',
-          meetingDate: meta.meetingDate,
-          sessionId: meta.sessionId,
-          segmentIndex: meta.segmentIndex,
-          totalSegments: meta.totalSegments,
-          existingRecordingId: meta.existingRecordingId,
-        } as QueueItem
-      } catch {
-        return null
-      }
-    }),
+  // 3. Instantiate services
+  const settingsService = new SettingsService()
+  const authService = new AuthService(settingsService)
+  const accumulator = new PcmAccumulator()
+  const sessionController = new SessionController(
+    accumulator,
+    QueueStore,
+    pushToRenderer,
+    settingsService,
+    authService,
+    () => uploadWorker.nudge(),
   )
-
-  const completeItems = await Promise.all(
-    completeFiles.map(async file => {
-      const job = JSON.parse(await readFile(path.join(getQueueDir(), file), 'utf-8')) as SessionCompleteJob
-      return {
-        id: job.id,
-        type: 'session_complete' as const,
-        sessionId: job.sessionId,
-        createdAt: job.createdAt,
-        // câmpuri obligatorii în tip, neutilizate pentru complete jobs
-        fileName: '', mimeType: '', sizeBytes: 0, title: '', roomName: '',
-        location: '', participants: '', meetingDate: '', segmentIndex: 0,
-      } as QueueItem
-    }),
+  const uploadWorker = new UploadWorker(
+    QueueStore,
+    authService,
+    settingsService,
+    pushToRenderer,
   )
+  uploadWorker.start()
 
-  return [...uploadItems.filter((item): item is QueueItem => item !== null), ...completeItems]
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-}
-
-async function enqueueSegment(payload: {
-  fileName: string
-  mimeType: string
-  bytes: ArrayBuffer
-  roomName: string
-  location: string
-  meetingDate: string
-  title: string
-  participants: string
-  sessionId: string
-  segmentIndex: number
-  isFinalSegment?: boolean
-}) {
-  await ensureAppStorage()
-  const id = `${Date.now()}-${randomUUID()}`
-  const totalSegments = payload.isFinalSegment ? payload.segmentIndex + 1 : undefined
-  const meta: StoredSegmentMeta = {
-    id,
-    fileName: payload.fileName,
-    mimeType: payload.mimeType,
-    createdAt: new Date().toISOString(),
-    roomName: payload.roomName,
-    location: payload.location,
-    meetingDate: payload.meetingDate,
-    title: payload.title,
-    participants: payload.participants,
-    sessionId: payload.sessionId,
-    segmentIndex: payload.segmentIndex,
-    totalSegments,
+  // 4. Segments directory
+  const segmentsDir = path.join(app.getPath('userData'), 'segments')
+  if (!fs.existsSync(segmentsDir)) {
+    fs.mkdirSync(segmentsDir, { recursive: true })
   }
 
-  // JSON primul: la crash între cele două scrieri rămâne un JSON fără .audio,
-  // pe care listQueueItems îl ignoră (stat(audioPath) eșuează → return null).
-  // Invers (audio fără JSON) nu ar fi niciodată curățat.
-  await writeFile(path.join(getQueueDir(), `${id}.json`), JSON.stringify(meta), 'utf-8')
-  await writeFile(path.join(getQueueDir(), `${id}.audio`), Buffer.from(payload.bytes))
+  // 5. Clean up WAV files that are no longer referenced in the DB
+  QueueStore.cleanupOrphanWavs(segmentsDir)
 
-  if (payload.isFinalSegment && totalSegments !== undefined) {
-    await withQueueLock(async () => {
-      const files = await readdir(getQueueDir())
-      for (const file of files.filter(f => f.endsWith('.json') && !f.startsWith('scomplete-'))) {
-        const p = path.join(getQueueDir(), file)
-        const m = JSON.parse(await readFile(p, 'utf-8')) as StoredSegmentMeta
-        if (m.sessionId === payload.sessionId && m.id !== id && m.totalSegments === undefined) {
-          m.totalSegments = totalSegments
-          await writeFile(p, JSON.stringify(m), 'utf-8')
-        }
-      }
+  // 6. Register all IPC handlers
+  registerIpcHandlers({
+    authService,
+    settingsService,
+    sessionController,
+    uploadWorker,
+    queueStore: QueueStore,
+    segmentsDir,
+  })
+
+  // 7. Create the main window
+  function createWindow(): BrowserWindow {
+    const isDev = !!process.env.VITE_DEV_SERVER_URL
+
+    const win = new BrowserWindow({
+      width: 420,
+      height: 700,
+      minWidth: 380,
+      minHeight: 600,
+      resizable: true,
+      title: 'MeetRec Room Client',
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.cjs'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+      },
     })
-  }
 
-  return { id }
-}
-
-async function writeSessionCompleteJob(sessionId: string, totalSegments: number) {
-  const job: SessionCompleteJob = {
-    id: `scomplete-${sessionId}`,
-    type: 'session_complete',
-    sessionId,
-    totalSegments,
-    createdAt: new Date().toISOString(),
-  }
-  await writeFile(path.join(getQueueDir(), `scomplete-${sessionId}.json`), JSON.stringify(job), 'utf-8')
-}
-
-async function sendSessionComplete(payload: { id: string; serverUrl: string; token: string }) {
-  const jobPath = path.join(getQueueDir(), `${payload.id}.json`)
-  const job = JSON.parse(await readFile(jobPath, 'utf-8')) as SessionCompleteJob
-
-  if (!job.totalSegments) {
-    console.warn('[SessionComplete] fișier job fără totalSegments — șters:', job.id)
-    await rm(jobPath, { force: true })
-    return { ok: true, status: 0, body: 'incomplete job deleted' }
-  }
-
-  const form = new FormData()
-  form.append('total_segments', String(job.totalSegments))
-  console.log('[SessionComplete] trimit session_id:', job.sessionId, 'total_segments:', job.totalSegments)
-
-  const response = await fetch(
-    `${normalizeServerUrl(payload.serverUrl)}/api/v1/inbox/session/${job.sessionId}/complete`,
-    {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${payload.token}` },
-      body: form,
-    },
-  )
-
-  const bodyText = await response.text()
-  let body: unknown = null
-  try { body = bodyText ? JSON.parse(bodyText) : null } catch { body = bodyText }
-
-  // 409 = sesiunea a fost deja dispatchată (de ex. de Session Watcher) — tratăm ca succes
-  // pentru că scopul /complete a fost atins: sesiunea este în transcriere.
-  const ok = response.ok || response.status === 409
-  return { ok, status: response.status, body }
-}
-
-async function patchSiblingSegments(sessionId: string, uploadedId: string, recordingId: string) {
-  const files = await readdir(getQueueDir())
-  for (const file of files.filter(f => f.endsWith('.json') && !f.startsWith('scomplete-'))) {
-    const metaPath = path.join(getQueueDir(), file)
-    const m = JSON.parse(await readFile(metaPath, 'utf-8')) as StoredSegmentMeta
-    if (m.sessionId === sessionId && m.id !== uploadedId && !m.existingRecordingId) {
-      m.existingRecordingId = recordingId
-      await writeFile(metaPath, JSON.stringify(m), 'utf-8')
-    }
-  }
-}
-
-async function deleteQueueItem(id: string) {
-  await rm(path.join(getQueueDir(), `${id}.audio`), { force: true })
-  await rm(path.join(getQueueDir(), `${id}.json`), { force: true })
-}
-
-async function uploadQueueItem(payload: { id: string; serverUrl: string; token: string }) {
-  const metaPath = path.join(getQueueDir(), `${payload.id}.json`)
-  const audioPath = path.join(getQueueDir(), `${payload.id}.audio`)
-  const meta = JSON.parse(await readFile(metaPath, 'utf-8')) as StoredSegmentMeta
-  const audioBuffer = await readFile(audioPath)
-
-  const form = new FormData()
-  form.append('file', new Blob([audioBuffer], { type: meta.mimeType }), meta.fileName)
-  form.append('title', meta.title)
-  form.append('meeting_date', meta.meetingDate)
-  form.append('location', meta.location)
-  if (meta.participants) {
-    form.append('participants', meta.participants)
-  }
-  form.append('description', `Inregistrare automata — ${meta.roomName}`)
-  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-  const sessionId = UUID_RE.test(meta.sessionId ?? '') ? meta.sessionId : randomUUID()
-  form.append('session_id', sessionId)
-  form.append('segment_index', String(Number.isInteger(meta.segmentIndex) ? meta.segmentIndex : 0))
-  if (meta.existingRecordingId) {
-    form.append('existing_recording_id', meta.existingRecordingId)
-  }
-
-  const response = await fetch(`${normalizeServerUrl(payload.serverUrl)}/api/v1/inbox/upload`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${payload.token}`,
-    },
-    body: form,
-  })
-
-  const bodyText = await response.text()
-  let body: unknown = null
-  try {
-    body = bodyText ? JSON.parse(bodyText) : null
-  } catch {
-    body = bodyText
-  }
-
-  if (response.ok && meta.sessionId) {
-    // Patch recording_id pe celelalte segmente ale sesiunii (dacă e prezent în răspuns)
-    const recordingId = (
-      body !== null && typeof body === 'object' && 'recording_id' in body
-        ? (body as { recording_id: string | null }).recording_id
-        : null
+    // Allow microphone access from the renderer
+    win.webContents.session.setPermissionRequestHandler(
+      (_webContents, permission, callback) => {
+        callback(permission === 'media')
+      },
     )
-    if (recordingId) {
-      await withQueueLock(() => patchSiblingSegments(meta.sessionId, payload.id, recordingId))
-    }
 
-    // Trimite /complete după ultimul segment — fără să depindă de recording_id.
-    // Serverul face lookup după session_id singur.
-    const isLastSegment = Number.isInteger(meta.totalSegments) &&
-      meta.segmentIndex === (meta.totalSegments as number) - 1
-    if (isLastSegment) {
-      await writeSessionCompleteJob(meta.sessionId, meta.totalSegments as number)
-      const completeResult = await sendSessionComplete({
-        id: `scomplete-${meta.sessionId}`,
-        serverUrl: payload.serverUrl,
-        token: payload.token,
-      }).catch(() => ({ ok: false }))
-      if (completeResult.ok) {
-        await rm(path.join(getQueueDir(), `scomplete-${meta.sessionId}.json`), { force: true })
-      }
-      // dacă eșuează (ex. ingest încă procesează seg 0 → 404), fișierul rămâne pe disk
-      // și queue poller îl reîncearcă la fiecare 5s
-    }
-  }
-
-  return {
-    ok: response.ok,
-    status: response.status,
-    body,
-  }
-}
-
-function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1360,
-    height: 900,
-    minWidth: 1180,
-    minHeight: 760,
-    backgroundColor: '#0d1b16',
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  })
-
-  // Permite accesul la microfon din renderer
-  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
-    if (permission === 'media') {
-      callback(true)
+    if (isDev) {
+      void win.loadURL(process.env.VITE_DEV_SERVER_URL!)
+      win.webContents.openDevTools()
     } else {
-      callback(false)
+      void win.loadFile(path.join(__dirname, '../dist/index.html'))
     }
-  })
 
-  const devServerUrl = process.env.VITE_DEV_SERVER_URL
-  if (devServerUrl) {
-    void mainWindow.loadURL(devServerUrl)
-    mainWindow.webContents.openDevTools({ mode: 'detach' })
-    return
+    // Push initial queue stats once the renderer is ready
+    win.webContents.once('did-finish-load', () => {
+      const stats = QueueStore.getQueueStats()
+      pushToRenderer(IPC.QUEUE_UPDATED, { ...stats, isUploading: false })
+    })
+
+    return win
   }
-
-  void mainWindow.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'))
-}
-
-app.whenReady().then(async () => {
-  await ensureAppStorage()
-
-  ipcMain.handle('settings:load', loadSettings)
-  ipcMain.handle('settings:save', (_event, settings: ClientSettings) => saveSettings(settings))
-  ipcMain.handle('queue:list', listQueueItems)
-  ipcMain.handle('queue:enqueue', (_event, payload) => enqueueSegment(payload))
-  ipcMain.handle('queue:delete', (_event, id: string) => deleteQueueItem(id))
-  ipcMain.handle('queue:upload', (_event, payload) => uploadQueueItem(payload))
-  ipcMain.handle('queue:complete', (_event, payload) => sendSessionComplete(payload))
 
   createWindow()
 
+  // 8. Start the upload worker loop
+  uploadWorker.start()
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
+      // macOS: re-create window on dock icon click — only the window, not the services
       createWindow()
     }
   })
 })
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit()
-  }
+  if (process.platform !== 'darwin') app.quit()
 })
