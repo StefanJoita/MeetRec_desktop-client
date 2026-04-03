@@ -6,8 +6,10 @@ import type { SettingsService } from './SettingsService'
 import { IPC } from '../../shared/ipc-constants'
 
 const MAX_ERROR_COUNT = 5
-const MAX_COMPLETE_RETRIES = 5
+const MAX_COMPLETE_RETRIES = 5        // pentru erori reale (4xx non-409, 5xx)
+const MAX_INGEST_WAIT_RETRIES = 40   // pentru 409 "ingest încă procesează" (~3min cu 5s delay)
 const COMPLETE_RETRY_DELAY_MS = 3000
+const INGEST_WAIT_DELAY_MS = 5000
 const MAX_CONCURRENT_UPLOADS = 3
 
 export class UploadWorker {
@@ -235,7 +237,10 @@ export class UploadWorker {
     const totalSegments =
       rows.find(r => r.total_segments != null)?.total_segments ?? rows.length
 
-    for (let attempt = 0; attempt < MAX_COMPLETE_RETRIES; attempt++) {
+    let errorAttempts = 0
+    let ingestAttempts = 0
+
+    while (errorAttempts < MAX_COMPLETE_RETRIES && ingestAttempts < MAX_INGEST_WAIT_RETRIES) {
       try {
         const response = await fetch(
           `${serverUrl}/api/v1/inbox/session/${sessionId}/complete`,
@@ -249,20 +254,29 @@ export class UploadWorker {
           },
         )
 
-        if (response.ok || response.status === 201 || response.status === 409) {
+        if (response.ok || response.status === 201) {
           this._finalizeSession(sessionId)
           return
         }
 
+        if (response.status === 409) {
+          // Ingest-ul încă procesează segmentele — așteptăm și reîncercăm
+          ingestAttempts++
+          console.log(`[UploadWorker] /complete 409 — ingest în curs (attempt ${ingestAttempts}/${MAX_INGEST_WAIT_RETRIES})`)
+          await this._sleep(INGEST_WAIT_DELAY_MS)
+          continue
+        }
+
         const body = await response.text().catch(() => '')
         console.error(`[UploadWorker] /complete failed (${response.status}): ${body}`)
-
-        if (attempt < MAX_COMPLETE_RETRIES - 1) {
+        errorAttempts++
+        if (errorAttempts < MAX_COMPLETE_RETRIES) {
           await this._sleep(COMPLETE_RETRY_DELAY_MS)
         }
       } catch (err) {
         console.error('[UploadWorker] /complete network error:', err)
-        if (attempt < MAX_COMPLETE_RETRIES - 1) {
+        errorAttempts++
+        if (errorAttempts < MAX_COMPLETE_RETRIES) {
           await this._sleep(COMPLETE_RETRY_DELAY_MS)
         }
       }
