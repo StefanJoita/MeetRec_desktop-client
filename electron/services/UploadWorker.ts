@@ -156,6 +156,7 @@ export class UploadWorker {
       form.append('location', segment.location)
       form.append('participants', segment.participants)
       form.append('meeting_date', segment.meeting_date)
+      form.append('existing_recording_id', segment.session_id)
 
       // Timeout dinamic: minim 60s, mai lung pentru segmente mari (~5KB/s minim)
       const timeoutMs = Math.max(60_000, Math.ceil(segment.audio_bytes / 5_000))
