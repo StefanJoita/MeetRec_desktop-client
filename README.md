@@ -1,120 +1,231 @@
+<div align="center">
+
 # MeetRec Desktop Client
 
-Client desktop pentru calculatorul din sala de ședințe. Aplicația captează audio de la microfonul local, segmentează înregistrarea în bucăți fixe și trimite fiecare segment către serverul MeetRec prin API-ul existent.
+**Electron companion app for conference-room audio capture and upload.**
 
-## Ce face aplicația
+[![Electron](https://img.shields.io/badge/Electron-29-47848F?style=flat-square&logo=electron&logoColor=white)](https://electronjs.org)
+[![React](https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://typescriptlang.org)
+[![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D4?style=flat-square&logo=windows&logoColor=white)](https://microsoft.com/windows)
+[![License](https://img.shields.io/badge/License-Proprietary-red?style=flat-square)](LICENSE)
 
-- setup wizard la prima pornire: configurare server, sală și permisiune microfon
-- login cu user și parolă prin `/api/v1/auth/login`, restore automată a sesiunii
-- înregistrare continuă pe segmente (WAV PCM 16-bit, mono)
-- fiecare sesiune de înregistrare primește un `session_id` unic — toate segmentele aceleiași ședințe sunt grupate pe server ca o singură înregistrare
-- după confirmarea ultimului segment, trimite explicit `POST /api/v1/inbox/session/{id}/complete` pentru a declanșa imediat transcrierea fără a aștepta timeout-ul serverului
-- răspunsul 409 de la `/session/complete` este tratat ca succes (sesiunea a fost deja dispecerizată)
-- coadă locală persistentă pe disc pentru segmentele netrimise; fișierele `.scomplete` de control sunt excluse din operațiunile de patch pentru a evita coruperea lor
-- retry automat la upload la fiecare 5 secunde
-- interfață separată pentru rolul operator (simplu: start/stop) și admin (configurare completă)
-- test conexiune server și test microfon din setări
+*Runs in a meeting room. Records continuously. Uploads automatically. Requires no manual intervention.*
 
-## Structură
+[Quick Start](#quick-start) · [Features](#features) · [Architecture](#architecture) · [Configuration](#configuration) · [Building](#building)
 
-```text
-electron/
-  main.ts          — process principal: filesystem, IPC, upload HTTP
-  preload.ts       — bridge IPC tipat
+</div>
 
-src/
-  app/
-    AppShell.tsx   — routing bazat pe stare (setup / login / rol)
-  features/
-    auth/          — login, restore sesiune, logout
-    recorder/      — Web Audio API, encoding WAV, segmentare
-    queue/         — polling coadă, retry upload
-    settings/      — load/save setări
-    setup/         — wizard prima pornire
-  screens/
-    OperatorScreen.tsx
-    AdminScreen.tsx
-    ParticipantBlockedScreen.tsx
-  shared/
-    hooks/useDevices.ts   — permisiune microfon + enumerare dispozitive
-  infrastructure/
-    api/           — auth-api, http-client
-    desktop-bridge.ts
-    session-storage.ts
-```
+---
 
-## Cerințe locale
+## What it does
 
-- Node.js 20+
-- npm 10+
-- Windows 10/11
+The desktop client runs on a dedicated PC in a meeting room. It captures audio from any connected microphone, splits the recording into fixed-size WAV segments, and uploads them to a [MeetRec server](https://github.com/StefanJoita/MeetRec) with automatic retry if the network is unavailable. When the meeting ends, the operator clicks **Stop** and the server immediately assembles all segments and begins Whisper transcription.
 
-## Comenzi
+Segments are persisted to a local SQLite queue — if the app restarts mid-meeting, queued uploads resume automatically.
+
+---
+
+## Features
+
+- **Continuous recording** — captures audio via Web Audio API + AudioWorklet with no gaps between segments
+- **WAV encoding** — segments encoded as PCM 16-bit mono WAV directly in the Electron main process
+- **Configurable segment duration** — 30 s to 3600 s (default: 5 minutes); shorter segments reach the server sooner
+- **Persistent upload queue** — segments survive app restarts; uploads resume automatically on next launch
+- **Automatic retry** — failed uploads are retried every 5 seconds with exponential backoff
+- **Session grouping** — every segment in a meeting shares a `session_id` UUID; the server groups them into a single recording
+- **Explicit session completion** — after the last segment is confirmed, the client calls `POST /inbox/session/{id}/complete`; the server starts transcription immediately without waiting for a timeout
+- **Role-based UI** — `admin` sees recorder + full settings; `operator` sees recorder only; `participant` is blocked with an informational screen
+- **Setup wizard** — first-run wizard collects server URL, room name, and microphone permission; settings are persisted in SQLite
+- **Session restore** — JWT and session state are restored automatically on relaunch
+- **Microphone selector** — lists all available audio input devices; selection persists across restarts
+- **Connection test** — verifies server reachability from the settings screen before starting a meeting
+- **Microphone test** — captures a short sample and plays it back to confirm the microphone is working
+
+---
+
+## Requirements
+
+- Windows 10 or 11
+- Node.js 20+ and npm 10+ (development only)
+- A running [MeetRec server](https://github.com/StefanJoita/MeetRec) reachable over the network
+- A USB or built-in microphone; USB conference microphones (e.g. Jabra Speak 510, Jabra Speak 750) significantly improve transcription accuracy for 6–15 participants
+
+---
+
+## Quick Start
+
+### Use a pre-built release
+
+Download the latest installer or portable executable from the [Releases](https://github.com/StefanJoita/MeetRec_desktop-client/releases) page. Run it, complete the setup wizard, and the app is ready.
+
+### Build from source
 
 ```powershell
-# Prima rulare
+# 1. Clone
+git clone https://github.com/StefanJoita/MeetRec_desktop-client.git
+cd MeetRec_desktop-client
+
+# 2. Install dependencies
 npm install
 
-# Development
-$env:Path = "C:\Program Files\nodejs;" + $env:Path
+# 3. Start in development mode
 npm run dev
 ```
 
-Build distribuție Windows:
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────┐
+│           React Renderer                │
+│  (AppShell → screens based on role)     │
+│                                         │
+│  AudioWorklet → PCM chunks via IPC      │
+└──────────────┬──────────────────────────┘
+               │ window.meetrecDesktop.*
+               │ (context-isolated IPC bridge)
+               ▼
+┌─────────────────────────────────────────┐
+│         Electron Main Process           │
+│                                         │
+│  WAV encoder (audio/wav-encoder.ts)     │
+│  SQLite queue  (userData/meetrec.db)    │
+│  WAV files     (userData/segments/)     │
+│  UploadWorker  (retry + backoff)        │
+└──────────────┬──────────────────────────┘
+               │ HTTP (axios)
+               ▼
+┌─────────────────────────────────────────┐
+│           MeetRec Server                │
+│  POST /api/v1/inbox/upload              │
+│  POST /api/v1/inbox/session/{id}/complete│
+└─────────────────────────────────────────┘
+```
+
+### Process model
+
+| Layer | Technology | Responsibility |
+|---|---|---|
+| **Renderer** | React 18 + Vite + TailwindCSS | UI, microphone capture via AudioWorklet |
+| **IPC bridge** | Electron preload (context isolation) | Typed channel bridge via `window.meetrecDesktop` |
+| **Main process** | Electron + Node.js | WAV encoding, SQLite persistence, upload queue, HTTP calls |
+| **Storage** | SQLite (`userData/meetrec.db`) | Settings, upload queue, segment metadata |
+
+### Role routing
+
+After login, the server-side user role determines the screen shown:
+
+| Role | Screen | Capabilities |
+|---|---|---|
+| `admin` | `AdminScreen` | Recorder + all settings tabs (server, room, microphone, account) |
+| `operator` | `OperatorScreen` | Recorder only (start/stop meeting) |
+| `participant` | `ParticipantBlockedScreen` | Informational — no recording access |
+
+---
+
+## Data flow
+
+1. Renderer captures microphone PCM via `AudioWorklet` and sends chunks to Electron main over IPC (`capture:pcm-chunk`)
+2. Main accumulates chunks, encodes a WAV segment when the configured duration is reached, writes it to `userData/segments/`
+3. A `segments` row is inserted into SQLite with status `pending`
+4. `UploadWorker` drains the queue: `POST /api/v1/inbox/upload` with the WAV file and session metadata; on success the local WAV file is deleted and the row marked `uploaded`
+5. After the operator clicks **Stop**, the final segment is uploaded and the client calls `POST /api/v1/inbox/session/{session_id}/complete`; a 409 response (already dispatched) is treated as success
+6. The server assembles all segments, runs Whisper, and the transcript appears in the web UI
+
+---
+
+## Configuration
+
+All settings are stored in SQLite and managed through the app's settings screen. There are no config files to edit manually.
+
+| Setting | Description |
+|---|---|
+| **Server URL** | Base URL of the MeetRec server (e.g. `https://meetrec.company.local`) |
+| **Room name** | Inserted as the `location` field on every uploaded recording |
+| **Segment duration** | Duration of each WAV chunk in seconds (30–3600, default: 300) |
+| **Microphone** | Audio input device; selected from a dropdown populated by the OS |
+| **Username / Password** | MeetRec server credentials; JWT is cached and refreshed automatically |
+
+---
+
+## Building
 
 ```powershell
-npm run dist:portable   # executabil portabil
-npm run dist:setup      # installer NSIS
-npm run dist:all        # ambele variante
+# Type-check only
+npm run typecheck
+
+# Full build (typecheck + Vite + Electron bundle)
+npm run build
+
+# Distribution builds (output in release/)
+npm run dist:portable   # Portable .exe — no installer required
+npm run dist:setup      # NSIS installer
+npm run dist:all        # Both variants
 ```
 
-Artefactele se generează în `release/`.
+---
 
-## Flux operațional
+## API endpoints used
 
-1. La prima pornire, wizard-ul ghidează configurarea: URL server → nume sală → permisiune microfon.
-2. Aplicația restaurează automat sesiunea anterioară la repornire.
-3. Operatorul pornește înregistrarea, introduce titlul ședinței și participanții.
-4. Aplicația înregistrează continuu și taie segmente la intervalul configurat (implicit 5 minute).
-5. Fiecare segment e salvat local cu `session_id` și `segment_index`, apoi trimis automat la server.
-6. Dacă serverul nu răspunde, segmentele rămân pe disc și se retrimite automat.
-7. La confirmarea ultimului segment, aplicația apelează `POST /session/complete` — serverul asamblează imediat toate segmentele și pornește transcrierea Whisper.
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/api/v1/auth/login` | Obtain JWT |
+| `GET` | `/api/v1/auth/me` | Verify session + fetch user profile |
+| `POST` | `/api/v1/inbox/upload` | Upload one WAV segment (multipart) |
+| `POST` | `/api/v1/inbox/session/{id}/complete` | Signal end of session → trigger immediate transcription |
 
-## API server — câmpuri trimise la upload
+### Upload fields (`multipart/form-data`)
 
-`POST /api/v1/inbox/upload` — `multipart/form-data`:
+| Field | Value |
+|---|---|
+| `file` | WAV file |
+| `title` | Meeting title entered by the operator |
+| `meeting_date` | Date the meeting started (`YYYY-MM-DD`) |
+| `location` | Room name from settings |
+| `participants` | Comma-separated participant names |
+| `description` | `Inregistrare automata — <room name>` |
+| `session_id` | UUID shared by all segments of one meeting |
+| `segment_index` | Segment order: 0, 1, 2, … |
 
-| Câmp | Descriere |
-|------|-----------|
-| `file` | fișier WAV |
-| `title` | titlul ședinței |
-| `meeting_date` | data ședinței (YYYY-MM-DD) |
-| `location` | locația |
-| `participants` | participanți separați prin virgulă |
-| `description` | `Inregistrare automata — <nume sală>` |
-| `session_id` | UUID unic per sesiune de înregistrare |
-| `segment_index` | ordinea segmentului (0, 1, 2...) |
+---
 
-`session_id` și `segment_index` permit serverului să grupeze toate segmentele aceleiași ședințe ca o singură înregistrare.
+## Project structure
 
-### Semnalizare finalizare sesiune
+```
+electron/
+  main.ts              — main process: settings, queue, upload, IPC handlers
+  preload.ts           — context-isolated IPC bridge → window.meetrecDesktop
+  audio/
+    wav-encoder.ts     — PCM → WAV encoding
 
-`POST /api/v1/inbox/session/{session_id}/complete` — `application/json`:
+src/
+  app/
+    AppShell.tsx       — root component: routes to screens based on auth state + role
+  hooks/
+    useMainState.ts    — subscribes to all main push events + invokes IPC commands
+    useCapture.ts      — AudioWorklet lifecycle; streams PCM chunks to main
+    useDevices.ts      — microphone device enumeration
+  screens/
+    LoginScreen.tsx
+    SetupWizard.tsx
+    OperatorScreen.tsx
+    AdminScreen.tsx
+    ParticipantBlockedScreen.tsx
+  components/
+    RecorderStatus.tsx
+    QueuePanel.tsx
+    SettingsForm.tsx
+    StartMeetingModal.tsx
+  types/
+    electron.d.ts      — TypeScript types for window.meetrecDesktop
 
-```json
-{ "session_id": "uuid" }
+shared/                — types shared between main and renderer
 ```
 
-Apelat automat după ce ultimul segment a fost confirmat de server. Răspunsul 409 (sesiune deja dispecerizată) este tratat ca succes.
+---
 
-## Limitări curente
+## License
 
-- pornirea automată cu Windows nu este implementată încă
-- upload-ul continuă doar cât timp aplicația rămâne deschisă
-- fără autentificare dedicată de dispozitiv (folosește user/parolă)
-
-## Pași următori recomandați
-
-- cheie dedicată de dispozitiv în loc de user/parolă
-- auto-start la boot și minimizare în system tray
-- jurnal local de evenimente
+Proprietary — all rights reserved. Contact the repository owner for licensing inquiries.
